@@ -1,7 +1,10 @@
 package mr
 
 import "fmt"
+import "io/ioutil"
 import "log"
+import "os"
+import "time"
 import "net/rpc"
 import "hash/fnv"
 
@@ -34,8 +37,67 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	DoMapTasks(mapf)
 
+}
+
+func DoMapTasks(mapf func(string, string) []KeyValue) {
+	for {
+		args := GetMapTaskArgs{}
+		reply := GetMapTaskReply{}
+		ok := call("Coordinator.GetMapTask", &args, &reply)
+		if ok {
+			filename := reply.Filename
+			nReduce := reply.NReduce
+			fileNumber := reply.FileNumber
+			log.Printf("GetMapTask: filename=%s nReduce=%d\n", filename, nReduce)
+			// IF coordinator returned nothing, then go to next step
+			if filename == "" {
+				return
+			}
+			// IF something else is working. map stage not finished
+			if filename == "-" {
+				time.Sleep(time.Second)
+				continue
+			}
+			// IF coordinator returned something. read file
+			file, err := os.Open(filename)
+			if err != nil {
+				log.Fatalf("cannot open %v", filename)
+			}
+			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				log.Fatalf("cannot read %v", filename)
+			}
+			file.Close()
+			// do map function
+			kva := mapf(filename, string(content))
+			// buffer result to slices of nReduce
+			buffer := make(map[int][]KeyValue)
+			for _, keyValue := range kva {
+				hashKey := ihash(keyValue.Key) % nReduce
+				buffer[hashKey] = append(buffer[hashKey], keyValue)
+			}
+			// write result to intermediate files
+			for i, entry := range buffer {
+				intermediateFileName := fmt.Sprintf("intermediate-%d-%d", fileNumber, i)
+                file, err := os.OpenFile(intermediateFileName, os.O_CREATE|os.O_WRONLY, 0644)
+                if err!= nil {
+                    log.Fatalf("cannot open %v", intermediateFileName)
+                }
+				for _, keyValue := range entry {
+					fmt.Fprintf(file, "%v %v\n", keyValue.Key, keyValue.Value)
+				}
+                file.Close()
+			}
+			// send to reduce stage
+			args2 := MarkMapTaskDoneArgs{filename}
+			reply2 := MarkMapTaskDoneReply{}
+			call("Coordinator.MarkMapTaskDone", &args2, &reply2)
+		} else {
+			log.Printf("call failed!\n")
+		}
+	}
 }
 
 //

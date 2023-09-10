@@ -5,14 +5,73 @@ import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+import "sync"
+
+type FileState struct {
+	processing bool
+	done bool
+	tried int
+	fileNumber int
+}
 
 
 type Coordinator struct {
 	// Your definitions here.
-
+	nReduce int
+	mu sync.Mutex
+	filenames map[string]FileState
+	mapStateDone bool
+	incFileNumber int
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+func (c *Coordinator) GetMapTask(args *GetMapTaskArgs, reply *GetMapTaskReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	reply.NReduce = c.nReduce
+
+	c.mapStateDone = true
+	for _, state := range c.filenames {
+		if !state.done {
+			c.mapStateDone = false
+			break
+		}
+	}
+	if c.mapStateDone {
+        reply.Filename = ""
+		return nil
+	}
+	for name, state := range c.filenames {
+		if !state.processing && !state.done && state.tried < 5 {
+			state.processing = true
+			state.tried++
+			state.fileNumber = c.incFileNumber
+			c.incFileNumber++
+			c.filenames[name] = state
+			reply.Filename = name
+			reply.FileNumber = state.fileNumber
+			log.Printf("GetMapTask: %s\n", name)
+            return nil
+        }
+	}
+	reply.Filename = "-"
+	return nil
+}
+
+func (c *Coordinator) MarkMapTaskDone(args *MarkMapTaskDoneArgs, reply *MarkMapTaskDoneReply) error {
+	c.mu.Lock()
+    defer c.mu.Unlock()
+	filename := args.Filename
+	log.Printf("MarkMapTaskDone: %s\n", filename)
+	if entry, ok := c.filenames[filename]; ok {
+		entry.done = true
+		entry.processing = false
+		c.filenames[filename] = entry
+	}
+    return nil
+}
 
 //
 // an example RPC handler.
@@ -61,8 +120,19 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-
+	c.nReduce = nReduce
+	c.filenames = make(map[string]FileState, 0)
+	c.mapStateDone = false
+	c.incFileNumber = 0
 	// Your code here.
+	for _, filename := range files {
+		c.filenames[filename] = FileState{processing: false, done: false, tried: 0}
+	}
+	
+	// For this lab, have the coordinator wait for ten seconds; 
+	// after that the coordinator should assume the worker has died
+	
+	
 
 
 	c.server()

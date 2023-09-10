@@ -22,6 +22,22 @@ type ExampleReply struct {
 	Y int
 }
 
+type GetMapTaskArgs struct {
+}
+
+type GetMapTaskReply struct {
+	Filename string
+	NReduce int
+	FileNumber int
+}
+
+type MarkMapTaskDoneArgs struct {
+	Filename string
+}
+
+type MarkMapTaskDoneReply struct {
+}
+
 // Add your RPC definitions here.
 
 
