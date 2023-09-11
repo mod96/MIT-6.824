@@ -7,7 +7,8 @@ import "os"
 import "time"
 import "net/rpc"
 import "hash/fnv"
-
+import "strings"
+import "sort"
 
 //
 // Map functions return a slice of KeyValue.
@@ -16,6 +17,13 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -38,6 +46,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	DoMapTasks(mapf)
+	DoReduceTasks(reducef)
 
 }
 
@@ -79,8 +88,10 @@ func DoMapTasks(mapf func(string, string) []KeyValue) {
 				buffer[hashKey] = append(buffer[hashKey], keyValue)
 			}
 			// write result to intermediate files
+			reduceFileNameMapping := make(map[int]string)
 			for i, entry := range buffer {
 				intermediateFileName := fmt.Sprintf("intermediate-%d-%d", fileNumber, i)
+				reduceFileNameMapping[i] = intermediateFileName
                 file, err := os.OpenFile(intermediateFileName, os.O_CREATE|os.O_WRONLY, 0644)
                 if err!= nil {
                     log.Fatalf("cannot open %v", intermediateFileName)
@@ -91,15 +102,86 @@ func DoMapTasks(mapf func(string, string) []KeyValue) {
                 file.Close()
 			}
 			// send to reduce stage
-			args2 := MarkMapTaskDoneArgs{filename}
+			args2 := MarkMapTaskDoneArgs{filename, reduceFileNameMapping}
 			reply2 := MarkMapTaskDoneReply{}
 			call("Coordinator.MarkMapTaskDone", &args2, &reply2)
 		} else {
-			log.Printf("call failed!\n")
+			log.Printf("GetMapTask call failed!\n")
 		}
 	}
 }
 
+func DoReduceTasks(reducef func(string, []string) string) {
+	for {
+		args := GetReduceTaskArgs{}
+        reply := GetReduceTaskReply{}
+        ok := call("Coordinator.GetReduceTask", &args, &reply)
+		if ok {
+			filenames := reply.Filenames
+            reduceKey := reply.ReduceKey
+            log.Printf("GetReduceTask: reduceKey=%d\n", reduceKey)
+            // IF coordinator returned nothing, then go to next step
+            if filenames == nil {
+                return
+            }
+            // IF something else is working. reduce stage not finished
+            if len(filenames) == 0 {
+                time.Sleep(time.Second)
+                continue
+            }
+            // IF coordinator returned something. read files and reduce stage
+			intermediate := []KeyValue{}
+			for _, filename := range filenames {
+				file, err := os.Open(filename)
+				if err!= nil {
+					log.Fatalf("cannot open %v", filename)
+				}
+				content, err := ioutil.ReadAll(file)
+				if err!= nil {
+					log.Fatalf("cannot read %v", filename)
+				}
+				file.Close()
+				for _, line := range strings.Split(string(content), "\n") {
+                    kv := strings.Split(line, " ")
+                    intermediate = append(intermediate, KeyValue{kv[0], kv[1]})
+                }
+			}
+			sort.Sort(ByKey(intermediate))
+
+			// do reduce function
+			oname := fmt.Sprintf("mr-out-%d", reduceKey)
+			ofile, _ := os.Create(oname)
+            //
+			// call Reduce on each distinct key in intermediate[],
+			// and print the result to mr-out-0.
+			//
+			i := 0
+			for i < len(intermediate) {
+				j := i + 1
+				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, intermediate[k].Value)
+				}
+				output := reducef(intermediate[i].Key, values)
+
+				// this is the correct format for each line of Reduce output.
+				fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+				i = j
+			}
+			ofile.Close()
+			// send to coordinator that reduce task is done
+			args2 := MarkReduceTaskDoneArgs{reduceKey}
+            reply2 := MarkReduceTaskDoneReply{}
+            call("Coordinator.MarkReduceTaskDone", &args2, &reply2)
+		} else {
+			log.Printf("GetReduceTask call failed!\n")
+		}
+	}
+}
 //
 // example function to show how to make an RPC call to the coordinator.
 //

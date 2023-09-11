@@ -22,6 +22,7 @@ type ExampleReply struct {
 	Y int
 }
 
+// Map task related RPC structs
 type GetMapTaskArgs struct {
 }
 
@@ -33,10 +34,28 @@ type GetMapTaskReply struct {
 
 type MarkMapTaskDoneArgs struct {
 	Filename string
+	ReduceFileNameMapping map[int]string
 }
 
 type MarkMapTaskDoneReply struct {
 }
+
+// Reduce task related RPC structs
+type GetReduceTaskArgs struct {
+}
+
+type GetReduceTaskReply struct {
+	Filenames []string
+	ReduceKey int
+}
+
+type MarkReduceTaskDoneArgs struct {
+	ReduceKey int
+}
+
+type MarkReduceTaskDoneReply struct {
+}
+
 
 // Add your RPC definitions here.
 
