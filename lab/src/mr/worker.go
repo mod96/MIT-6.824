@@ -9,6 +9,7 @@ import "net/rpc"
 import "hash/fnv"
 import "strings"
 import "sort"
+import "github.com/google/uuid"
 
 //
 // Map functions return a slice of KeyValue.
@@ -87,10 +88,13 @@ func DoMapTasks(mapf func(string, string) []KeyValue) {
 				hashKey := ihash(keyValue.Key) % nReduce
 				buffer[hashKey] = append(buffer[hashKey], keyValue)
 			}
+			// get unique identifier for this machine and process
+			uuid := uuid.New()
+			pid := os.Getpid()
 			// write result to intermediate files
 			reduceFileNameMapping := make(map[int]string)
 			for i, entry := range buffer {
-				intermediateFileName := fmt.Sprintf("intermediate-%d-%d", fileNumber, i)
+				intermediateFileName := fmt.Sprintf("intermediate-%s-%d-%d-%d", uuid.String(), pid, fileNumber, i)
 				reduceFileNameMapping[i] = intermediateFileName
                 file, err := os.OpenFile(intermediateFileName, os.O_CREATE|os.O_WRONLY, 0644)
                 if err!= nil {
@@ -142,15 +146,23 @@ func DoReduceTasks(reducef func(string, []string) string) {
 				}
 				file.Close()
 				for _, line := range strings.Split(string(content), "\n") {
+					if strings.TrimSpace(line) == "" {
+						continue
+					}
                     kv := strings.Split(line, " ")
                     intermediate = append(intermediate, KeyValue{kv[0], kv[1]})
                 }
 			}
 			sort.Sort(ByKey(intermediate))
 
+			// get unique identifier for this machine and process
+			uuid := uuid.New()
+			pid := os.Getpid()
+			tempFileName := fmt.Sprintf("temp-%s-%d", uuid.String(), pid)
+
 			// do reduce function
 			oname := fmt.Sprintf("mr-out-%d", reduceKey)
-			ofile, _ := os.Create(oname)
+			ofile, _ := os.Create(tempFileName)
             //
 			// call Reduce on each distinct key in intermediate[],
 			// and print the result to mr-out-0.
@@ -173,6 +185,9 @@ func DoReduceTasks(reducef func(string, []string) string) {
 				i = j
 			}
 			ofile.Close()
+			// When a reduce task completes, the reduce worker atomically 
+			// renames its temporary output file to the final output file.
+			os.Rename(tempFileName, oname)
 			// send to coordinator that reduce task is done
 			args2 := MarkReduceTaskDoneArgs{reduceKey}
             reply2 := MarkReduceTaskDoneReply{}

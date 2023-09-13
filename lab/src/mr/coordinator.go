@@ -84,19 +84,25 @@ func (c *Coordinator) MarkMapTaskDone(args *MarkMapTaskDoneArgs, reply *MarkMapT
 	c.mu.Lock()
     defer c.mu.Unlock()
 	filename := args.Filename
-	log.Printf("MarkMapTaskDone: %s\n", filename)
 	if entry, ok := c.mapFileNames[filename]; ok {
+		if entry.done {
+			log.Printf("MarkMapTaskDone Ignored For Already Done: %s\n", filename)
+			return nil
+		}
+		log.Printf("MarkMapTaskDone: %s\n", filename)
 		entry.done = true
 		entry.processing = false
 		c.mapFileNames[filename] = entry
-	}
-	reduceFileNameMapping := args.ReduceFileNameMapping
-	for reduceKey, reduceFilename := range reduceFileNameMapping {
-		if entry, ok := c.reduceFilenames[reduceKey]; ok {
-			entry.fileNames = append(entry.fileNames, reduceFilename)
-			c.reduceFilenames[reduceKey] = entry
-        } else {
-			c.reduceFilenames[reduceKey] = ReduceFiles{false, time.Time{}, false, 0, []string{reduceFilename}}
+
+		// save filenames to reduceFilenames mapping
+		reduceFileNameMapping := args.ReduceFileNameMapping
+		for reduceKey, reduceFilename := range reduceFileNameMapping {
+			if entry, ok := c.reduceFilenames[reduceKey]; ok {
+				entry.fileNames = append(entry.fileNames, reduceFilename)
+				c.reduceFilenames[reduceKey] = entry
+			} else {
+				c.reduceFilenames[reduceKey] = ReduceFiles{false, time.Time{}, false, 0, []string{reduceFilename}}
+			}
 		}
 	}
     return nil
@@ -127,6 +133,7 @@ func (c *Coordinator) GetReduceTask(args *GetReduceTaskArgs, reply *GetReduceTas
                 state.tried++
                 c.reduceFilenames[key] = state
                 reply.Filenames = state.fileNames
+				reply.ReduceKey = key
                 log.Printf("GetReduceTask: %d\n", key)
                 return nil
             } else {
@@ -143,8 +150,12 @@ func (c *Coordinator) MarkReduceTaskDone(args *MarkReduceTaskDoneArgs, reply *Ma
 	c.mu.Lock()
     defer c.mu.Unlock()
     key := args.ReduceKey
-    log.Printf("MarkReduceTaskDone: %d\n", key)
     if entry, ok := c.reduceFilenames[key]; ok {
+		if entry.done {
+            log.Printf("MarkReduceTaskDone Ignored For Already Done: %d\n", key)
+            return nil
+        }
+		log.Printf("MarkReduceTaskDone: %d\n", key)
         entry.done = true
         entry.processing = false
         c.reduceFilenames[key] = entry
