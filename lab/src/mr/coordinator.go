@@ -68,7 +68,9 @@ func (c *Coordinator) GetMapTask(args *GetMapTaskArgs, reply *GetMapTaskReply) e
 				c.mapFileNames[name] = state
 				reply.Filename = name
 				reply.FileNumber = state.fileNumber
-				log.Printf("GetMapTask: %s\n", name)
+				if DebugPrint {
+					log.Printf("Coordinator - GetMapTask: %s\n", name)
+				}
 				return nil
 			} else {
 				state.done = true
@@ -86,10 +88,14 @@ func (c *Coordinator) MarkMapTaskDone(args *MarkMapTaskDoneArgs, reply *MarkMapT
 	filename := args.Filename
 	if entry, ok := c.mapFileNames[filename]; ok {
 		if entry.done {
-			log.Printf("MarkMapTaskDone Ignored For Already Done: %s\n", filename)
+			if DebugPrint {
+				log.Printf("Coordinator - MarkMapTaskDone Ignored For Already Done: %s\n", filename)
+			}
 			return nil
 		}
-		log.Printf("MarkMapTaskDone: %s\n", filename)
+		if DebugPrint {
+			log.Printf("Coordinator - MarkMapTaskDone: %s\n", filename)
+		}
 		entry.done = true
 		entry.processing = false
 		c.mapFileNames[filename] = entry
@@ -134,7 +140,9 @@ func (c *Coordinator) GetReduceTask(args *GetReduceTaskArgs, reply *GetReduceTas
                 c.reduceFilenames[key] = state
                 reply.Filenames = state.fileNames
 				reply.ReduceKey = key
-                log.Printf("GetReduceTask: %d\n", key)
+				if DebugPrint {
+                	log.Printf("[Coordinator] GetReduceTask: %d\n", key)
+				}
                 return nil
             } else {
                 state.done = true
@@ -142,7 +150,7 @@ func (c *Coordinator) GetReduceTask(args *GetReduceTaskArgs, reply *GetReduceTas
             }
         }
 	}
-	reply.Filenames = []string{}
+	reply.Filenames = []string{"-"}
 	return nil
 }
 
@@ -152,10 +160,14 @@ func (c *Coordinator) MarkReduceTaskDone(args *MarkReduceTaskDoneArgs, reply *Ma
     key := args.ReduceKey
     if entry, ok := c.reduceFilenames[key]; ok {
 		if entry.done {
-            log.Printf("MarkReduceTaskDone Ignored For Already Done: %d\n", key)
+			if DebugPrint {
+            	log.Printf("[Coordinator] MarkReduceTaskDone Ignored For Already Done: %d\n", key)
+			}
             return nil
         }
-		log.Printf("MarkReduceTaskDone: %d\n", key)
+		if DebugPrint {
+			log.Printf("[Coordinator] MarkReduceTaskDone: %d\n", key)
+		}
         entry.done = true
         entry.processing = false
         c.reduceFilenames[key] = entry
@@ -201,17 +213,20 @@ func (c *Coordinator) Done() bool {
     defer c.mu.Unlock()
 	now := time.Now()
     for name, state := range c.mapFileNames {
-        if state.processingTime.Before(now.Add(-10 * time.Second)) {
+        if !state.done && state.processingTime.Before(now.Add(-10 * time.Second)) {
             state.processing = false
 			c.mapFileNames[name] = state
         }
     }
 	for reduceKey, state := range c.reduceFilenames {
-		if state.processingTime.Before(now.Add(-10 * time.Second)) {
+		if !state.done && state.processingTime.Before(now.Add(-10 * time.Second)) {
             state.processing = false
             c.reduceFilenames[reduceKey] = state
         }
 	}
+	if (c.mapStateDone && c.reduceStateDone && DebugPrint) {
+		log.Printf("Coordinator Done\n")
+    }
 	return c.mapStateDone && c.reduceStateDone
 }
 

@@ -48,7 +48,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	DoMapTasks(mapf)
 	DoReduceTasks(reducef)
-
+	if DebugPrint {
+		fmt.Printf("[Worker] exited\n")
+	}
 }
 
 func DoMapTasks(mapf func(string, string) []KeyValue) {
@@ -60,7 +62,9 @@ func DoMapTasks(mapf func(string, string) []KeyValue) {
 			filename := reply.Filename
 			nReduce := reply.NReduce
 			fileNumber := reply.FileNumber
-			log.Printf("GetMapTask: filename=%s nReduce=%d\n", filename, nReduce)
+			if DebugPrint {
+				log.Printf("[Worker] GetMapTask: filename=%s nReduce=%d\n", filename, nReduce)
+			}
 			// IF coordinator returned nothing, then go to next step
 			if filename == "" {
 				return
@@ -123,13 +127,15 @@ func DoReduceTasks(reducef func(string, []string) string) {
 		if ok {
 			filenames := reply.Filenames
             reduceKey := reply.ReduceKey
-            log.Printf("GetReduceTask: reduceKey=%d\n", reduceKey)
+			if DebugPrint {
+            	log.Printf("[Worker] GetReduceTask: reduceKey=%d, filenames=%v\n", reduceKey, filenames)
+			}
             // IF coordinator returned nothing, then go to next step
             if filenames == nil {
                 return
             }
             // IF something else is working. reduce stage not finished
-            if len(filenames) == 0 {
+            if len(filenames) == 1 && filenames[0] == "-" {
                 time.Sleep(time.Second)
                 continue
             }

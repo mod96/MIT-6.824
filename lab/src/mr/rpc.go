@@ -56,6 +56,8 @@ type MarkReduceTaskDoneArgs struct {
 type MarkReduceTaskDoneReply struct {
 }
 
+var DebugPrint = false
+
 
 // Add your RPC definitions here.
 
