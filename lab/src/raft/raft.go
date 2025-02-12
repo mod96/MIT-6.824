@@ -183,6 +183,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
+	// Rules for Servers
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor = args.CandidateId
+		rf.lastHeartBeat = time.Now()
+	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 		((rf.log[len(rf.log)-1].Term < args.LastLogTerm) ||
 			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 <= args.LastLogIndex)) {
@@ -262,12 +269,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	DPrintf(dLog, "S%d, appendEntries recieved from %d", rf.me, args.LeaderId)
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
+		DPrintf(dLog, "S%d, appendEntries recieved from %d - term %d is too old. rf.currentTerm: %d", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		reply.Success = false
 		return
 	}
+	// Rules for Servers
+	rf.lastHeartBeat = time.Now() // appendEntries can only be sent by the leader
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor = args.LeaderId
+	}
+	// description 2
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
@@ -328,7 +345,7 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		rf.mu.Lock()
 		if rf.state == Leader {
-			DPrintf(dLeader, "S%d Leader, checking heartbeats", rf.me)
+			DPrintf(dLeader, "S%d Leader, checking heartbeats in term %d", rf.me, rf.currentTerm)
 			// Heartbeat
 			rf.lastHeartBeat = time.Now()
 
@@ -350,24 +367,35 @@ func (rf *Raft) ticker() {
 				go func(serverIdx int) {
 					reply := &AppendEntriesReply{}
 					rf.sendAppendEntries(serverIdx, &appendEntriesArgs, reply)
+
+					// Re-locking if we modify shared state
+					rf.mu.Lock()
+					// Rules for Servers
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.state = Follower
+						rf.votedFor = serverIdx
+						rf.lastHeartBeat = time.Now()
+					}
+					rf.mu.Unlock()
 				}(serverIdx)
 			}
 
-			time.Sleep(150 * time.Millisecond) // 150 milliseconds
+			time.Sleep(100 * time.Millisecond) // 100 milliseconds
 		} else {
 			rf.mu.Unlock()
-			n := rand.Intn(1500) + 1500                     // 1500 ~ 3000
-			time.Sleep(time.Duration(n) * time.Millisecond) // 1500 ~ 3000 ms
+			n := rand.Intn(150) + 200
+			time.Sleep(time.Duration(n) * time.Millisecond) // 200 ~ 350 ms
 
 			rf.mu.Lock()
 			inElection := (rf.state == Follower || rf.state == Candidate) &&
 				rf.lastHeartBeat.Before(time.Now().Add(-time.Duration(n)*time.Millisecond))
 
 			if inElection {
-				DPrintf(dVote, "S%d Candidate, requesting votes", rf.me)
 				rf.currentTerm++
 				rf.votedFor = rf.me
 				rf.lastHeartBeat = time.Now()
+				DPrintf(dVote, "S%d Candidate, requesting votes for term %d", rf.me, rf.currentTerm)
 
 				rf.state = Candidate
 
@@ -399,20 +427,23 @@ func (rf *Raft) ticker() {
 						if reply.Term > rf.currentTerm {
 							rf.currentTerm = reply.Term
 							rf.state = Follower
+							rf.votedFor = serverIdx
+							rf.lastHeartBeat = time.Now()
 						}
 						rf.mu.Unlock()
 
 						ch <- reply.VoteGranted
 					}(serverIdx)
 				}
-				for i := 0; i < len(rf.peers); i++ {
+				for i := 0; count <= len(rf.peers)/2 && i < len(rf.peers); i++ {
 					if i != rf.me && <-ch {
 						count++
 					}
 				}
+				DPrintf(dVote, "S%d Candidate, vote result: %d", rf.me, count)
 				rf.mu.Lock() // Lock again for leader conversion check
-				if count > len(rf.peers)/2 {
-					DPrintf(dVote, "S%d Candidate -> Leader, i'm now a leader", rf.me)
+				if rf.state == Candidate && count > len(rf.peers)/2 {
+					DPrintf(dVote, "S%d Candidate -> Leader, i'm now a leader in term %d", rf.me, rf.currentTerm)
 					rf.state = Leader
 				}
 				rf.mu.Unlock()
