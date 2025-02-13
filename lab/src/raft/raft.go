@@ -406,13 +406,12 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock() // Unlock before spawning goroutines to avoid deadlocks
 
 				count := 1
-				ch := make(chan bool)
 
 				for serverIdx := range rf.peers {
 					if serverIdx == rf.me {
 						continue
 					}
-					go func(serverIdx int) {
+					go func(serverIdx int, count *int) {
 						reply := &RequestVoteReply{}
 						rf.sendRequestVote(serverIdx, &RequestVoteArgs{
 							Term:         currentTerm,
@@ -423,6 +422,7 @@ func (rf *Raft) ticker() {
 
 						// Re-locking if we modify shared state
 						rf.mu.Lock()
+						defer rf.mu.Unlock()
 						// Rules for Servers
 						if reply.Term > rf.currentTerm {
 							rf.currentTerm = reply.Term
@@ -430,23 +430,15 @@ func (rf *Raft) ticker() {
 							rf.votedFor = serverIdx
 							rf.lastHeartBeat = time.Now()
 						}
-						rf.mu.Unlock()
-
-						ch <- reply.VoteGranted
-					}(serverIdx)
+						if reply.VoteGranted {
+							*count++
+							if rf.state == Candidate && *count > len(rf.peers)/2 {
+								DPrintf(dVote, "S%d Candidate -> Leader, i'm now a leader in term %d", rf.me, rf.currentTerm)
+								rf.state = Leader
+							}
+						}
+					}(serverIdx, &count)
 				}
-				for i := 0; count <= len(rf.peers)/2 && i < len(rf.peers); i++ {
-					if i != rf.me && <-ch {
-						count++
-					}
-				}
-				DPrintf(dVote, "S%d Candidate, vote result: %d", rf.me, count)
-				rf.mu.Lock() // Lock again for leader conversion check
-				if rf.state == Candidate && count > len(rf.peers)/2 {
-					DPrintf(dVote, "S%d Candidate -> Leader, i'm now a leader in term %d", rf.me, rf.currentTerm)
-					rf.state = Leader
-				}
-				rf.mu.Unlock()
 			} else {
 				rf.mu.Unlock() // Unlock if no election was started
 			}

@@ -7,7 +7,29 @@ source ./testkit/.venv/bin/activate
 
 ### 2A
 
+```bash
+go test -run 2A
 ```
-python ./testkit/dstest.py -p 10 -n 50 -o ./testkit TestManyElections2A
-python ./testkit/dslogs.py ./testkit/TestManyElections2A_4.log -c 7
+
+```bash
+python ./testkit/dstest.py -p 10 -n 50 -o ./testkit 2A
+```
+
+```
+(.venv) ~$ go test -run 2A
+Test (2A): initial election ...
+  ... Passed --   3.1  3   54   13422    0
+Test (2A): election after network failure ...
+  ... Passed --   4.4  3  118   20744    0
+Test (2A): multiple elections ...
+  ... Passed --   5.4  7  552   95124    0
+PASS
+ok      6.824/raft      12.929s
+(.venv) ~$ python ./testkit/dstest.py -p 10 -n 50 -o ./testkit 2A
+ Verbosity level set to 1
+┏━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━┓
+┃ Test ┃ Failed ┃ Total ┃         Time ┃
+┡━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━┩
+│ 2A   │      0 │    50 │ 13.36 ± 0.32 │
+└──────┴────────┴───────┴──────────────┘
 ```
