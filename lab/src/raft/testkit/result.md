@@ -33,3 +33,10 @@ ok      6.824/raft      12.929s
 │ 2A   │      0 │    50 │ 13.36 ± 0.32 │
 └──────┴────────┴───────┴──────────────┘
 ```
+
+### 2B
+
+```bash
+VERBOSE=1 go test -run TestBasicAgree2B
+time go test -run 2B
+```

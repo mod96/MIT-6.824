@@ -66,3 +66,10 @@ func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error)
 	}
 	return
 }
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

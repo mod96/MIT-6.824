@@ -18,6 +18,7 @@ package raft
 //
 import (
 	//	"bytes"
+
 	"sync"
 	"sync/atomic"
 
@@ -50,7 +51,7 @@ type ApplyMsg struct {
 }
 
 type Log struct {
-	Command string
+	Command interface{}
 	Term    int
 }
 
@@ -285,9 +286,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = args.LeaderId
 	}
 	// description 2
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		DPrintf(dLog, "S%d, appendEntries recieved from %d - we need to go back from PrevLogIndex %d", rf.me, args.LeaderId, args.PrevLogIndex)
 		reply.Success = false
 		return
+	}
+	// description 3 & 4
+	st := args.PrevLogIndex + 1
+	for i, entry := range args.Entries {
+		if st+i >= len(rf.log) {
+			rf.log = append(rf.log, args.Entries[i:]...)
+			break
+		}
+		if st+i < len(rf.log) &&
+			(rf.log[st+i].Term != entry.Term ||
+				rf.log[st+i].Command != entry.Command) {
+			rf.log[st+i] = entry
+		}
+	}
+	if args.Entries != nil {
+		DPrintf(dTrace, "S%d, appendEntries recieved from %d - now log is %v", rf.me, args.LeaderId, rf.log)
+	}
+	// description 5
+	if args.LeaderCommit > rf.commitIndex {
+		// send newly commited logs to applyCh
+		for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i}
+		}
+		DPrintf(dLog, "S%d, appendEntries recieved from %d - update leadercommit from %d to %d", rf.me, args.LeaderId, rf.commitIndex, args.LeaderCommit)
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 	}
 	reply.Success = true
 }
@@ -311,10 +341,63 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 	// Your code here (2B).
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return -1, -1, false
+	}
+
+	appendEntriesArgs := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: len(rf.log) - 1,
+		PrevLogTerm:  rf.log[len(rf.log)-1].Term,
+		Entries:      []Log{{command, rf.currentTerm}},
+		LeaderCommit: rf.commitIndex,
+	}
+	index := len(rf.log)
+	term := rf.currentTerm
+	isLeader := true
+
+	rf.mu.Unlock()
+
+	count := 0
+	for serverIdx := range rf.peers {
+		go func(serverIdx int, count *int) {
+			reply := &AppendEntriesReply{}
+			rf.sendAppendEntries(serverIdx, &appendEntriesArgs, reply)
+
+			// Re-locking if we modify shared state
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			// Rules for Servers
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.state = Follower
+				rf.votedFor = serverIdx
+				rf.lastHeartBeat = time.Now()
+			}
+			if rf.state == Leader && reply.Success {
+				*count++
+				DPrintf(dLeader, "S%d, appendEntries succeeded to %d", rf.me, serverIdx)
+				if *count > len(rf.peers)/2 &&
+					rf.commitIndex < appendEntriesArgs.PrevLogIndex+len(appendEntriesArgs.Entries) {
+					// applyCh for leader
+					for i := rf.commitIndex + 1; i <= appendEntriesArgs.PrevLogIndex+len(appendEntriesArgs.Entries); i++ {
+						rf.applyCh <- ApplyMsg{
+							CommandValid: true,
+							Command:      rf.log[i].Command,
+							CommandIndex: i}
+					}
+					DPrintf(dLeader, "S%d, appendEntries succeeded to %d - update leader commit from %d to %d", rf.me, serverIdx, rf.commitIndex, appendEntriesArgs.PrevLogIndex+len(appendEntriesArgs.Entries))
+					rf.commitIndex = appendEntriesArgs.PrevLogIndex + len(appendEntriesArgs.Entries)
+				}
+			}
+
+		}(serverIdx, &count)
+	}
+
 	return index, term, isLeader
 }
 
