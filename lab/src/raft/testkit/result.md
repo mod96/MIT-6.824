@@ -2,6 +2,7 @@ https://blog.josejg.com/debugging-pretty/
 
 ```
 source ./testkit/.venv/bin/activate
+python ./testkit/dslogs.py ./testkit/TestBasicAgree2B_10.log -c 3
 ```
 
 
@@ -39,4 +40,9 @@ ok      6.824/raft      12.929s
 ```bash
 VERBOSE=1 go test -run TestBasicAgree2B
 time go test -run 2B
+```
+
+```bash
+python ./testkit/dstest.py -p 1 -n 1 -o ./testkit TestRejoin2B
+python ./testkit/dslogs.py ./testkit/TestRejoin2B_0.log -c 3
 ```
