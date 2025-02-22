@@ -191,7 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = args.CandidateId
-		rf.lastHeartBeat = time.Now()
+		// rf.lastHeartBeat = time.Now()
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 		((rf.log[len(rf.log)-1].Term < args.LastLogTerm) ||
@@ -308,10 +308,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	if args.Entries != nil {
-		DPrintf(dTrace, "S%d, appendEntries recieved from %d - now log is %v", rf.me, args.LeaderId, rf.log)
+		DPrintf(dTrace, "S%d, appendEntries recieved from %d - now log is %v and commit is %d", rf.me, args.LeaderId, rf.log, rf.commitIndex)
 	}
 	// description 5
-	if args.LeaderCommit > rf.commitIndex {
+	if args.PrevLogIndex >= args.LeaderCommit && args.LeaderCommit > rf.commitIndex {
 		// send newly commited logs to applyCh
 		for i := rf.commitIndex + 1; i < len(rf.log) && i <= args.LeaderCommit; i++ {
 			rf.applyCh <- ApplyMsg{
@@ -362,7 +362,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// signal sendLogsToServers
 	rf.sendLogsCond.Broadcast()
 	DPrintf(dLeader, "S%d, nextIndex are %v", rf.me, rf.nextIndex)
-	DPrintf(dTrace, "S%d, log is %v", rf.me, rf.log)
+	DPrintf(dTrace, "S%d, log is %v and commit is %d", rf.me, rf.log, rf.commitIndex)
 
 	return index, term, isLeader
 }
@@ -489,7 +489,7 @@ func (rf *Raft) updateCommitLoop() {
 					Command:      rf.log[i].Command,
 					CommandIndex: i}
 			}
-			DPrintf(dLog2, "S%d, updated leader commit from %d to %d", rf.me, rf.commitIndex, newCommitIdx)
+			DPrintf(dLog2, "S%d, update leadercommit from %d to %d", rf.me, rf.commitIndex, newCommitIdx)
 			rf.commitIndex = newCommitIdx
 		}
 
