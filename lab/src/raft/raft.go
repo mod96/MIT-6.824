@@ -308,7 +308,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	if args.Entries != nil {
-		DPrintf(dTrace, "S%d, appendEntries recieved from %d - now log is %v and commit is %d", rf.me, args.LeaderId, rf.log, rf.commitIndex)
+		DPrintf(dTrace, "S%d, appendEntries recieved from %d - now log is len %d and commit is %d", rf.me, args.LeaderId, len(rf.log), rf.commitIndex)
 	}
 	// description 5
 	if args.PrevLogIndex >= args.LeaderCommit && args.LeaderCommit > rf.commitIndex {
@@ -362,7 +362,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// signal sendLogsToServers
 	rf.sendLogsCond.Broadcast()
 	DPrintf(dLeader, "S%d, nextIndex are %v", rf.me, rf.nextIndex)
-	DPrintf(dTrace, "S%d, log is %v and commit is %d", rf.me, rf.log, rf.commitIndex)
+	DPrintf(dTrace, "S%d, log is len %d and commit is %d", rf.me, len(rf.log), rf.commitIndex)
 
 	return index, term, isLeader
 }
@@ -444,8 +444,9 @@ func (rf *Raft) commitConditionMetInteger() int {
 	// set commitIndex = N
 
 	// lock is already held by the caller
-	count := 1
+	DPrintf(dLeader, "S%d Leader, checking new commit. currentCommit: %d, matchIndex: %v", rf.me, rf.commitIndex, rf.matchIndex)
 	for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
+		count := 1
 		for serverIdx := range rf.peers {
 			if serverIdx == rf.me {
 				continue
@@ -473,7 +474,7 @@ func (rf *Raft) updateCommitLoop() {
 
 			}
 			if rf.state == Leader {
-				DPrintf(dLeader, "S%d Leader, commit not updating. currentCommit: %d, matchIndex: %v", rf.me, rf.commitIndex, rf.matchIndex)
+				DPrintf(dLeader, "S%d Leader, commit not updating.", rf.me)
 			}
 			rf.applyChCond.Wait()
 		}
