@@ -199,7 +199,381 @@ Raft extends beyond basic consensus to support **dynamic membership changes**, *
 
 These enhancements make Raft a **practical and scalable** consensus algorithm suitable for real-world distributed systems.
 
-# Lecture 5
+# 1. Lecture 5
+
+## 1.1. Introduction to consensus algorithm (quorum system)
+
+A pattern in the fault-tolerant systems we've seen so far:
+  * MR replicates computation but relies on a single master to organize
+  * GFS replicates data but relies on the master to pick primaries
+  * VMware FT replicates service but relies on test-and-set to pick primary. All rely on a single entity to make critical decisions
+    - nice thing: **decisions by a single entity avoid split brain.** it's easy to make a single entity always agree with itself
+
+How can we make e.g. a fault-tolerant test-and-set service? It's obvious we need replication. How about two servers, S1 and S2? If both are up, S1 is in charge, forwards decisions to S2. If S2 sees S1 is down, S2 takes over as sole test-and-set server. What could go wrong? A failure (or network partition) can make S2 think S1 is down, leading S2 to take over. But if S1 is actually alive, now both S1 and S2 act as leaders (split-brain).
+
+How about letting client to decide which is in charge? Client C1 thinks S1 is in charge, so sends test-and-set to S1 and S2, request to S2 fails. But client cannot know if S2 is down, or network partition happened. Otherwise, Client C2 thinks S2 is in charge and might success since C1 to S2 was network partition. Now what?
+
+```mermaid
+flowchart LR;
+    C1-->S1;
+    C1-- fail -->S2;
+    C2-- ? -->S2;
+```
+
+The problem here is that computers cannot distinguish "server crashed" from "network broken".
+The symptom is the same: no response to a query over the network.
+This difficulty seemed insurmountable for a long time.
+Seemed to require outside agent (a human) to decide when to switch servers (manual intervention).
+We'd prefer an automated scheme!
+
+The big insight for coping w/ partition is majority vote.
+```
+  Suppose we have an odd number of servers, e.g. 3
+  Agreement from a majority is required to do anything -- 2 out of 3 
+   - majority is out of all servers, not just out of live ones
+  If no majority, wait
+  Proceed after acquiring majority
+```
+Why does majority help **avoid split brain**?
+  - **at most one partition can have a majority**
+  - breaks the symmetry we saw with just two servers
+  - more generally 2f+1 can tolerate f failed servers since the remaining f+1 is a majority of 2f+1
+    
+
+Two partition-tolerant replication schemes were invented around 1990,
+  Paxos and View-Stamped Replication
+  called "consensus" or "agreement" protocols
+  in the last 15 years this technology has seen a lot of real-world use
+  the Raft paper is a good introduction to modern techniques
 
 
-# Lecture 6
+## 1.2. Raft Overview: State Machine Replication
+
+Raft implements **state machine replication**, ensuring all servers apply the same operations in the same order.  
+
+### Raft Architecture
+Each server consists of:  
+- **Key/Value Layer**: Stores actual application state (e.g., a database).  
+- **Raft Layer**: Manages consensus using logs.  
+
+### How a Client Command is Processed in Raft
+1. **Client sends a command** (e.g., `Put(k, v)`) to the leader.  
+2. **Leader adds the command to its log**.  
+3. **Leader sends "AppendEntries" RPCs** to followers.  
+4. **Followers add the command to their logs**.  
+5. **Leader waits for a majority to replicate the command**.  
+6. **Once a majority acknowledges, the command is "committed"**.  
+7. **Leader applies the command to the state machine and responds to the client**.  
+
+### Why Keep a Log?
+- Orders commands for **consistent execution across replicas**.  
+- Stores **tentative** commands until a majority commits them.  
+- Allows recovery after failures.  
+- Ensures followers can catch up if they lag behind.  
+
+### Are Logs Identical Across Servers?
+- **Not always**: Some followers may lag behind.  
+- **However, they eventually converge**, ensuring only stable commands are executed.  
+
+
+## 1.3. Leader Election in Raft (Lab 2A)
+
+### Why Elect a Leader?
+- Ensures all replicas execute the same commands in the same order.  
+- Unlike Paxos (which is leaderless), Raft uses a **single leader** per term.  
+
+### Leader Election Process
+1. A **server starts an election** if it doesn’t receive heartbeats from a leader within an **election timeout**.  
+2. It increments its **currentTerm** and requests votes from other servers.  
+3. A candidate needs **a majority of votes** to become leader.  
+
+**Key Constraints:**  
+- A server votes **only once per term**.  
+- If a candidate receives a majority, it becomes the leader.  
+- If no candidate wins (e.g., votes are split), a **new election starts with a higher term number**.  
+
+### How a Server Learns About a New Leader
+- The leader **sends periodic heartbeats** using `AppendEntries` RPCs.  
+- If a server sees a higher term in an `AppendEntries` RPC, it steps down.  
+
+## 1.4. How Raft Avoids Split Votes
+
+If multiple candidates start elections at the same time, they may all get one vote each, preventing a majority.  
+
+**Solution: Randomized Election Timeout**  
+- Each server **waits a random time** before starting an election.  
+- This **breaks symmetry**, making one candidate more likely to win.  
+- If a leader is elected quickly, other servers receive heartbeats and do not start elections.  
+
+### Choosing the Election Timeout
+- Must be **long enough** to avoid unnecessary elections.  
+- Must be **short enough** to detect failures quickly.  
+- Lab 2A requires elections to complete **within 5 seconds**.  
+
+
+## 1.5. Handling Old Leaders and Network Partitions
+
+What happens if an old leader is unaware of the new leader?  
+- The new leader has a **higher term number**.  
+- If the old leader tries to append new log entries:  
+  - Followers will reject them because they see a higher term.  
+  - The old leader will **step down**.  
+- This prevents **split-brain** but may cause temporary log divergence.  
+
+
+# 2. Lecture 6
+
+In the previous lecture, we explored Raft's leader election process, ensuring that **each term has at most one leader**. Clients interact exclusively with the leader, ensuring they do not see inconsistencies from follower states or logs. Today, we shift focus to log replication, persistence, and compaction, which are crucial for maintaining consistency and preventing divergence in distributed systems.
+
+## 2.1. Raft Log and Log Divergence (Lab 2B)
+
+A key challenge in log replication is **log divergence**, which occurs when different servers maintain different logs due to leader crashes and elections. Consider a scenario where a leader crashes before propagating an entry to all followers. For example, if S1, S2, and S3 are servers, the logs could look like this:
+
+```
+S1: 3
+S2: 3 3
+S3: 3 3
+```
+
+Here, S1 missed an entry due to a crash (of leader S2 or S3), causing a temporary divergence. More dangerously, different logs might have different commands in the same index. If a series of leader crashes occur, logs could end up looking like this:
+
+```
+       10 11 12 13  <- Log Index
+S1:     3
+S2:     3  3  4
+S3:     3  3  5
+```
+
+This divergence happens when a leader appends an entry, crashes before propagating fully, and a new leader later writes a different command at the same index. If these discrepancies are not resolved correctly, different servers might execute different operations for the same log index, violating **state machine safety**. Raft must ensure that if any server executes a given command, no other server executes a different command at that log index.
+
+To enforce consistency, Raft requires that when a new leader is elected, followers **truncate** any conflicting log entries and adopt the leader’s log. When a new leader (suppose S3 is elected) attempts to append an entry at index 13, it first sends an `AppendEntries` RPC referencing the previous log entry:
+
+```
+prevLogIndex=12, prevLogTerm=5
+```
+
+If a follower detects a conflict (e.g., a different term at index 12), it rejects the RPC. The leader then decrements `nextIndex` for that follower and retries with an earlier `prevLogIndex`, eventually overwriting conflicting entries. This ensures all followers’ logs match the leader’s log.
+
+```golang
+st := args.PrevLogIndex + 1
+for i, entry := range args.Entries {
+   ...
+   if st+i < len(rf.log) &&
+      (rf.log[st+i].Term != entry.Term ||
+         rf.log[st+i].Command != entry.Command) {
+      rf.log = append(rf.log[:st+i], args.Entries[i:]...)
+      break
+   }
+}
+```
+
+## 2.2. Ensuring Committed Entries Are Never Lost
+
+One fundamental guarantee in Raft is that **committed entries must never be lost**. A committed entry is one that a leader has successfully replicated to a majority. If a new leader does not contain a previously committed entry, it would be disastrous because clients might have already acted based on that committed state. To prevent this, Raft ensures that a newly elected leader **always contains all committed entries**.
+
+One might assume that electing the server with the longest log would solve this problem, but this approach is flawed. Consider the following scenario:
+
+```
+S1: 5 6 7
+S2: 5 8
+S3: 5 8
+```
+
+Here, S1 appears to have the longest log, but S2 and S3 might contain committed entries (e.g., entry 8). If S1 were elected, it might overwrite committed data. To prevent this, Raft’s **election restriction** states that a server will only vote for a candidate whose log is **at least as up-to-date** as its own. This is determined by **comparing the last log term** first, and if equal, **comparing the log length**. In the above case, S2 and S3 will not vote for S1, ensuring that the new leader retains all committed entries.
+
+<p align="center">
+    <img src="img/l6_1.PNG" width="50%" />
+</p>
+
+Here, suppose top server was the leader for term 8 and just died. Who could become leader?
+- a: yes -- a, b, e, f
+- b: no -- b, f
+- e has same last term, but its log is longer
+- c: yes -- a, b, c, e, f
+- d: yes -- a, b, c, d, e, f
+- e: no -- b, f
+- f: no -- f
+
+=> why won't `d` prevent `a` from becoming leader? After all, `d`'s log has higher term than `a`'s log?
+=> `a` does not need `d`'s vote in order to get a majority. `a` does not even need to wait for `d`'s vote. `d`'s logs with idx 10, 11, 12 are not committed. So we can discard them.
+
+## 2.3. Persistence and Crash Recovery (Lab 2C)
+
+After a server crash, it must be able to rejoin the cluster without disrupting consistency. Raft persists certain key state variables to stable storage:
+- **Log entries** to ensure commands are not lost. so next leader's vote majority includes the entry, so Election Restriction ensures new leader also has the entry.
+- **Current term** to avoid outdated leaders.
+- **Voted for** to prevent re-voting in the same term.
+
+These variables must be written to **non-volatile storage** before responding to RPCs. Without persistence, a rebooted server might mistakenly vote for multiple candidates in the same term, potentially electing multiple leaders.
+
+Some state variables, like `commitIndex` and `lastApplied`, do not need to be persisted since they can be recomputed from the log. However, persistence is often a **performance bottleneck**. Writing to disk is slow—HDD writes take about 10ms, while SSDs take around 0.1ms—limiting operations per second. To mitigate this, optimizations like **batching** multiple log entries per write and using battery-backed RAM are common.
+
+## 2.4. Log Compaction and Snapshots (Lab 2D)
+
+As a Raft cluster runs, its log grows indefinitely, consuming excessive storage. However, the **executed state** of the system captures all necessary historical data. To address this, Raft periodically creates **snapshots** that store the entire state of the application at a certain point, allowing earlier log entries to be discarded.
+
+Each server creates snapshots independently, storing them persistently. When a server restarts, it loads the snapshot instead of replaying the entire log, drastically reducing recovery time. The leader may also need to send a snapshot to a follower if the follower’s log falls behind and can no longer catch up via `AppendEntries`. In such cases, Raft uses an `InstallSnapshot` RPC to synchronize the follower.
+
+While snapshots are effective for small state machines, they become impractical for large databases. Instead, storing state in an on-disk structure like a B-tree can eliminate the need for explicit snapshots, allowing on-disk updates to serve as implicit snapshots.
+
+## 2.5. Optimizing Read-Only Operations
+
+In traditional Raft, even **read-only operations** like `Get(key)` must be committed in the log to prevent stale reads. Suppose a server incorrectly believes it is the leader and processes a read request. If a new leader exists, its state may be more recent, leading to inconsistent reads (split-brain). To prevent this, Raft forces all `Get` operations to be **committed** before responding, ensuring linearizability.
+
+However, committing read operations increases latency, which is problematic for read-heavy workloads. A common optimization is **leases**, where the leader, upon receiving an `AppendEntries` majority, grants itself a lease for a set duration (e.g., 5 seconds). During this lease period, it can process reads without logging them. If a new leader is elected, followers ensure the previous lease has expired before accepting writes, preventing stale reads.
+
+For the 6.5840 labs, students must commit `Get()` operations in the log, though real-world systems often use leases to optimize performance.
+
+# 3. Lecture 7 (article)
+
+The Go programming language, developed at Google in 2007 and released as open source in 2009, has grown into a foundational tool for cloud infrastructure. Many of the world’s largest cloud platforms, including Docker and Kubernetes, are built using Go. Its success stems not from groundbreaking language features but from its emphasis on engineering efficiency, dependency management, scalable development, and secure-by-default programming. This focus on the broader software development environment, rather than just the syntax or semantics of the language, has made Go a popular choice for building large-scale systems.
+
+## 3.1. Origins and Motivation
+Go was created in response to challenges encountered at Google, where thousands of engineers worked on a massive shared codebase in multiple languages (C++, Java, Python). A key issue was the complexity of dependencies—importing one library could trigger the compilation of an entire tree of dependencies, leading to inefficiencies. Additionally, existing multithreading models were cumbersome, making it difficult to fully utilize the growing number of CPU cores in modern systems.
+
+At the production level, Google was running massive distributed systems, processing petabytes of data and handling millions of requests per second. However, traditional concurrency models were inefficient, often requiring multiple copies of the same binary instead of efficient multithreading. Go was designed to simplify and optimize these challenges by introducing lightweight concurrency primitives, an efficient garbage collector, and a streamlined approach to dependency management.
+
+## 3.2. The Go Language and Its Ecosystem
+A key design philosophy of Go is to keep both the language and the broader programming environment simple and efficient. Go programs are structured around **packages**, which encourage modularity and prevent circular dependencies. Unlike C++, where importing one file can pull in an entire tree of dependencies, Go's package system ensures that each import only references a single, precompiled file, significantly speeding up compilation.
+
+Go provides a robust **type system** with basic types (integers, floats, strings, arrays, and structs) and more advanced constructs like maps and slices. Instead of traditional object-oriented inheritance, Go encourages composition and interface-based polymorphism. Interfaces in Go are implicitly implemented, meaning that any type with matching method signatures automatically satisfies an interface, making it easier to create modular and flexible systems.
+
+For example, consider the `io.Writer` interface:
+
+```go
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+)
+
+func main() {
+	var w io.Writer
+	w = os.Stdout // os.Stdout implements io.Writer
+	fmt.Fprintf(w, "Hello, Go!\n")
+}
+```
+
+Here, `os.Stdout` automatically satisfies `io.Writer` because it implements a `Write` method with the correct signature. This implicit interface implementation makes Go's type system more flexible and less verbose than languages like Java or C++.
+
+## 3.3. Concurrency: Lightweight and Scalable
+One of Go’s most innovative features is its **goroutines**, lightweight threads managed by the Go runtime. Unlike traditional operating system threads, goroutines consume minimal memory and can be spawned in the millions without degrading performance. Go’s built-in **channels** provide a safe way for goroutines to communicate without using locks.
+
+Consider a simple concurrent server:
+
+```go
+package main
+
+import (
+	"fmt"
+	"net"
+)
+
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+	fmt.Fprintln(conn, "Hello, client!")
+}
+
+func main() {
+	listener, _ := net.Listen("tcp", ":8080")
+	defer listener.Close()
+
+	for {
+		conn, _ := listener.Accept()
+		go handleConnection(conn) // Each connection handled by a new goroutine
+	}
+}
+```
+
+This example creates a TCP server where each incoming connection is handled by a separate goroutine. The use of **go** before `handleConnection(conn)` ensures that each request runs independently, allowing the server to handle thousands of connections concurrently.
+
+Go also provides **channels** for safe data sharing between goroutines:
+
+```go
+package main
+
+import "fmt"
+
+func worker(ch chan string) {
+	ch <- "Hello from goroutine"
+}
+
+func main() {
+	ch := make(chan string)
+	go worker(ch)
+	fmt.Println(<-ch) // Receives message from the goroutine
+}
+```
+
+This model of message passing encourages safe concurrency and reduces reliance on mutexes and locks.
+
+## 3.4. Security and Reliability
+Go enhances software security by eliminating common vulnerabilities in C and C++. It has **automatic memory management**, preventing memory leaks and use-after-free errors. **Array bounds checking** prevents buffer overflows, and **strict typing** avoids unintended type coercion.
+
+Additionally, Go includes a robust **standard library** with secure cryptographic functions, making it suitable for security-sensitive applications like Let's Encrypt, which has issued over a billion SSL certificates.
+
+## 3.5. Tooling and Development Experience
+Go’s development environment is designed for efficiency. The `go` command provides built-in tools for **building, testing, formatting, and dependency management**. `gofmt` ensures consistent code formatting, eliminating style debates. 
+
+Go’s **static analysis tools**, such as `go vet`, catch common mistakes before execution, while its **race detector** helps identify concurrency bugs. The ability to automate code refactoring via tools like `gofix` further enhances maintainability.
+
+## 3.6. Package and Dependency Management
+Go manages dependencies through **modules**, with package paths structured like URLs (e.g., `github.com/user/package`). Go enforces **semantic versioning**, automatically selecting the highest compatible version of dependencies to maintain reproducible builds.
+
+To ensure reliability, Go provides **module proxies and checksum databases**, preventing tampering and ensuring consistency across builds.
+
+## 3.7. Completeness and Consistency
+Unlike some languages that rely heavily on external libraries, Go provides built-in support for networking, cryptography, and web development. Its **net/http** package includes a fully functional HTTP server:
+
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+)
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintln(w, "Hello, World!")
+}
+
+func main() {
+	http.HandleFunc("/", handler)
+	http.ListenAndServe(":8080", nil)
+}
+```
+
+This simple example demonstrates how easy it is to create a web server using Go’s standard library.
+
+Another critical aspect is Go’s commitment to **backward compatibility**. Since the release of Go 1 in 2012, programs written for older versions continue to work unchanged. This stability has been crucial for enterprise adoption.
+
+## 3.8. The Evolution of Go: Generics in Go 1.18
+For a long time, Go did not include **generics** (parametric polymorphism), as the designers prioritized simplicity. However, with Go 1.18, released in 2022, generics were introduced in a way that maintains Go’s clarity and efficiency.
+
+A simple example of a generic function:
+
+```go
+package main
+
+import "fmt"
+
+func PrintSlice[T any](s []T) {
+	for _, v := range s {
+		fmt.Println(v)
+	}
+}
+
+func main() {
+	PrintSlice([]int{1, 2, 3})
+	PrintSlice([]string{"Go", "is", "great"})
+}
+```
+
+Here, `T` represents a type parameter, allowing `PrintSlice` to work with both integers and strings without duplicating code.
+
+## 3.9. Conclusion
+Go’s success is not just due to its syntax or features but its holistic approach to **scalable software development**. It simplifies dependency management, ensures safe concurrency, provides powerful built-in tools, and maintains long-term stability. While early critics cited the lack of generics as a limitation, Go has evolved while preserving its simplicity and efficiency.
+
+With its growing ecosystem and adoption in cloud computing, Go remains a dominant force in modern software engineering. As the language continues to improve—now with generics and evolving tooling—it will likely remain a cornerstone of cloud-native development for years to come.
