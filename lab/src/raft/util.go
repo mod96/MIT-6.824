@@ -73,3 +73,9 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+func copyLog(a []Log) []Log {
+	b := make([]Log, len(a))
+	copy(b, a)
+	return b
+}

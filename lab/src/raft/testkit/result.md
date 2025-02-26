@@ -86,3 +86,38 @@ sys     0m0.567s
 
 ### 2C
 
+```
+(.venv) ~$ time go test -run 2C
+Test (2C): basic persistence ...
+  ... Passed --  12.9  3  275   65943    7
+Test (2C): more persistence ...
+  ... Passed --  32.8  5 1693  364561   23
+Test (2C): partitioned leader and one follower crash, leader restarts ...
+  ... Passed --   1.6  3   41    9167    4
+Test (2C): Figure 8 ...
+  ... Passed --  31.3  5 1345  414273   61
+Test (2C): unreliable agreement ...
+  ... Passed --   1.7  5  338   97485  246
+Test (2C): Figure 8 (unreliable) ...
+  ... Passed --  29.0  5 2926  691541  226
+Test (2C): churn ...
+  ... Passed --  16.1  5 8809 2805931 3616
+Test (2C): unreliable churn ...
+  ... Passed --  16.3  5 1118  254066  209
+PASS
+ok      6.824/raft      141.868s
+
+real    2m22.120s
+user    0m12.444s
+sys     0m1.806s
+```
+
+```
+(.venv) ~$ python ./testkit/dstest.py -p 10 -n 50 -o ./testkit 2C
+ Verbosity level set to 1
+┏━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃ Test ┃ Failed ┃ Total ┃          Time ┃
+┡━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ 2C   │      0 │    50 │ 151.05 ± 7.34 │
+└──────┴────────┴───────┴───────────────┘
+```
