@@ -38,6 +38,8 @@ ZooKeeper follows a hierarchical key-value model similar to a file system but op
 ### 0.2.2. Sessions
 Clients interact with ZooKeeper through sessions. A session remains active as long as the client sends heartbeats within a specified timeout. If the session times out, ephemeral znodes created by that client are removed. Sessions allow seamless movement of clients across ZooKeeper servers while maintaining state.
 
+**How can client linearizability works if client session is re-established with other server?** ZooKeeper servers process write requests sequentially to maintain strict ordering. When a write request is processed, any relevant watches are triggered and cleared. Read requests, on the other hand, are handled locally at each server, offering excellent performance as they do not require disk access or coordination with other nodes. Each read request is assigned a `zxid` corresponding to the last transaction observed by the server, ensuring proper ordering of reads relative to writes. ZooKeeper ensures session durability by tracking the `last zxid` seen by each client. If a client reconnects to a different server, the new server checks that its data is at least as recent as the client's last known `zxid` before re-establishing the session. This mechanism guarantees that clients only observe changes that have been replicated to a majority of servers, ensuring durability across failures.
+
 ### 0.2.3. Client API
 The ZooKeeper API provides methods for creating, modifying, and monitoring znodes. Some key operations include:
 - **create(path, data, flags):** Creates a znode with the specified path, storing the provided data.
@@ -212,3 +214,107 @@ Yahoo!’s **Fetching Service (FS)** is a critical component of its web crawler,
 This architecture enables YMB to maintain reliable message distribution while efficiently handling failures and leader transitions.
 
 
+# 1. Lecture 10
+
+### 6.5840 2023 Lecture 10: ZooKeeper Case Study
+
+#### Introduction to ZooKeeper
+ZooKeeper is a distributed coordination service that simplifies the implementation of fault-tolerant distributed systems. It provides a high-performance, wait-free synchronization mechanism, reducing the complexity of implementing replicated state machines. This lecture explores ZooKeeper from two key perspectives: how it enables a simpler way to structure fault-tolerant services and how it achieves high performance through a Raft-like replication model.
+
+#### Fault-Tolerant Service Design
+One motivation for using ZooKeeper is the complexity of building distributed services directly on Raft. While Raft provides strong consistency guarantees, its direct implementation requires applications to manage a replicated state machine, affecting system structure and adding complexity. Instead of replicating computation, as done in traditional Raft-based state machine replication, ZooKeeper enables systems to replicate state while decoupling computation. This approach simplifies system design, making it easier to manage failures and reconfigure components dynamically.
+
+A concrete example is the MapReduce (MR) coordinator. If the MR coordinator fails, traditional fault-tolerance approaches would require a backup coordinator, increasing complexity. With ZooKeeper, the system stores the MR coordinator’s state in a fault-tolerant manner. When a failure occurs, a new coordinator instance can be started on any available machine, retrieving the necessary state from ZooKeeper and continuing execution seamlessly. This model is particularly advantageous in cloud environments where dynamically allocating replacement servers is common.
+
+#### ZooKeeper Data Model and API
+The ZooKeeper data model resembles a hierarchical file system, with znodes representing files and directories. Each znode has an associated version number, and there are three types: regular, ephemeral, and sequential. Ephemeral znodes are automatically deleted when the client session that created them terminates, which is particularly useful for leader election and failure detection. Sequential znodes append an incrementing sequence number to their name, which enables ordered operations.
+
+ZooKeeper provides a well-tuned API that supports distributed synchronization. Operations such as `create()`, `exists()`, `getData()`, `setData()`, and `sync()` allow clients to read, write, and monitor znodes efficiently. The API's design emphasizes concurrency control, using features like exclusive file creation, versioned updates for atomic writes, and watches to notify clients of changes. These mechanisms avoid inefficient polling and improve performance.
+
+#### Linearizability and Order Guarantees
+
+Suppose we built key/value server with Lab2 result, letting 'get' operation to be handled by any follower. What would happen in this scenario? Suppose Initially x was 0.
+
+<p align="center">
+    <img src="img/l10-1.PNG" width="80%" />
+</p>
+
+If appendEntries for follower2 arrived and handled before client2's read, client2 would have get 1. But in this picture, client2 will get 0. So this is not linearizable situation. What do we need more to guarantee linearizability?
+
+ZooKeeper enforces a hybrid consistency model. Writes are **linearizable**, meaning they behave as if executed atomically in a total order. This ensures that all servers agree on the order of updates, making writes behave as if issued on a single machine. However, reads follow **FIFO client order**, meaning each client's operations appear in the same order they were issued, though different clients may observe different read states due to follower lag. 
+
+Linearizability means:
+1. **There is a total order of operations.**
+2. **The order matches real-time.**
+3. **A read operation returns the value of the last completed write.**
+
+In practice, this means a client reading from a follower may see stale data if the follower has not yet received the latest committed write. If strong consistency is required, the client should issue a `sync()` before reading to ensure it sees the latest state.
+
+#### Handling Read-Write Anomalies
+One critical scenario involves the "ready" znode used to indicate the completion of a write sequence. Consider the following cases:
+- **Client reads "ready" before deletion**: The client may read outdated data before an update sequence.
+```
+W                   R
+                    exists("ready")
+                    read f1
+delete("ready")     // watch trigger -> must abort here and restart from exists("ready")
+write f1
+write f2
+create("ready")
+                    read f2 ?
+```
+- **Client reads "ready" after deletion but before recreation**: The client should wait
+```
+W                   R
+delete("ready")     
+                    exists("ready") // no! -> wait for watch trigger
+write f1
+write f2
+create("ready")
+                    read f1
+                    read f2
+```
+- **Client reads "ready" after recreation**: The client correctly observes the updated state.
+```
+W                   R
+delete("ready")     
+write f1
+write f2
+create("ready")
+                    exists("ready")
+                    read f1
+                    read f2
+```
+
+#### Counter Example: Waitless Design with Versioning
+A common use case is implementing a counter without explicit locking. ZooKeeper provides atomic updates using `getData()` and `setData()` with version checks:
+1. A client retrieves the counter’s current value and version using `getData("/counter")`.
+2. The client attempts to update the counter with `setData("/counter", value+1, version+1)`. If the version matches, the update succeeds; otherwise, the client retries.
+3. This approach ensures wait-free, lockless updates, avoiding unnecessary contention while maintaining correctness.
+```py
+while True:
+    value, version = getData("/counter")
+    if setData("/counter", value+1, version+1):
+        break
+```
+
+#### Locking and Leader Election
+A classic use case of ZooKeeper is MapReduce coordinator election, which follows a simple leader election mechanism. Candidates attempt to create an ephemeral znode (`/mr/c`). If the creation succeeds, the client acts as the leader. Otherwise, it sets a watch on the existing znode, waiting for its deletion before retrying. This approach ensures that when a leader fails, its ephemeral node disappears, triggering a new election.
+
+```py
+ticker():
+    while true:
+        if create("/mr/c", ephemeral=true)
+            act as coordinator...
+        else if exists("/mr/c", watch=true)
+            wait for watch event
+```
+
+To prevent split-brain scenarios, a fencing mechanism assigns each leader an increasing epoch number stored in ZooKeeper. Workers reject messages from older epoch numbers, ensuring only the most recent leader is recognized.
+
+#### ZooKeeper’s Resilience and Recovery
+ZooKeeper's resilience is demonstrated through its recovery behavior:
+- **Follower failure**: Reduces overall throughput but does not disrupt operations.
+- **Leader failure**: Triggers a brief pause for timeout and election, typically lasting a few seconds.
+
+Internally, ZooKeeper ensures durability through periodic snapshots and write-ahead logging. Although writes must be persisted to disk, batching improves throughput, and in-memory reads minimize latency.
