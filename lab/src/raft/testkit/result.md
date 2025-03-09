@@ -87,6 +87,11 @@ sys     0m0.567s
 ### 2C
 
 ```
+python ./testkit/dstest.py -p 20 -n 500 -o ./testkit TestFigure8Unreliable2C
+python ./testkit/dslogs.py ./testkit/TestFigure8Unreliable2C_93.log -c 5
+```
+
+```
 (.venv) ~$ time go test -run 2C
 Test (2C): basic persistence ...
   ... Passed --  12.9  3  275   65943    7

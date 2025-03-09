@@ -201,7 +201,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = Follower
-		rf.votedFor = args.CandidateId
+		rf.votedFor = -1
 		needPersist = true
 		// rf.lastHeartBeat = time.Now()
 	}
@@ -301,11 +301,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	// Rules for Servers
-	rf.lastHeartBeat = time.Now() // appendEntries can only be sent by the leader
+	rf.lastHeartBeat = time.Now()
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = Follower
-		rf.votedFor = args.LeaderId
+		rf.votedFor = args.LeaderId // if only leader can send this...
 		needPersist = true
 	}
 	// description 2
@@ -441,7 +441,7 @@ func (rf *Raft) sendLogsToServers() {
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.state = Follower
-					rf.votedFor = serverIdx
+					rf.votedFor = -1
 					rf.lastHeartBeat = time.Now()
 					rf.persist()
 				}
@@ -606,12 +606,27 @@ func (rf *Raft) ticker() {
 						rf.mu.Lock()
 						// Rules for Servers
 						if reply.Term > rf.currentTerm {
+							// *count = -len(rf.peers) // prevent split-brain since previous term accept arrives late -- NO!
+							// When a candidate in Term 101 requests votes, a network delay may cause responses to arrive after the candidate has already moved to Term 102.
+							// A vote reply for Term 101 arrives late and is processed after the node is already in Term 102.
+							// Even though *count = -len(rf.peers) is set when reply.Term > rf.currentTerm, **this only happens if the response has a higher term.**
+							// If the vote is granted for Term 101 (not a higher term), it still increments count.
+							// Instead, rf.currentTerm != currentTerm check will do the job.
 							rf.currentTerm = reply.Term
 							rf.state = Follower
-							rf.votedFor = serverIdx
+							rf.votedFor = -1
 							rf.lastHeartBeat = time.Now()
 							rf.persist()
+							rf.mu.Unlock()
+							return
 						}
+
+						// Ignore votes if the term has changed (stale vote)
+						if rf.currentTerm != currentTerm {
+							rf.mu.Unlock()
+							return
+						}
+
 						if reply.VoteGranted {
 							*count++
 							if rf.state == Candidate && *count > len(rf.peers)/2 {
@@ -621,12 +636,10 @@ func (rf *Raft) ticker() {
 								rf.reInitializeVolatileStates()
 								rf.mu.Unlock()
 								rf.sendHeartbeat() // send heartbeat immediately to prevent stale leader elections
-							} else {
-								rf.mu.Unlock()
+								return
 							}
-						} else {
-							rf.mu.Unlock()
 						}
+						rf.mu.Unlock()
 					}(serverIdx, &count)
 				}
 			} else {
@@ -674,7 +687,7 @@ func (rf *Raft) sendHeartbeat() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.state = Follower
-				rf.votedFor = serverIdx
+				rf.votedFor = -1
 				rf.lastHeartBeat = time.Now()
 				rf.persist()
 			}
@@ -731,8 +744,6 @@ func (rf *Raft) sleepWhileCheckingLeader(n int) {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	// DEBUG
-	DInit()
 
 	rf := &Raft{}
 	rf.peers = peers
