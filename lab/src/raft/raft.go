@@ -92,6 +92,8 @@ type Raft struct {
 	applyCh      chan ApplyMsg
 	applyChCond  *sync.Cond
 	sendLogsCond *sync.Cond
+
+	waitGoroutines sync.WaitGroup
 }
 
 // return currentTerm and whether this server
@@ -336,11 +338,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// description 5
 	if args.PrevLogIndex >= args.LeaderCommit && args.LeaderCommit > rf.commitIndex {
 		// send newly commited logs to applyCh
-		for i := rf.commitIndex + 1; i < len(rf.log) && i <= args.LeaderCommit; i++ {
+		for i := rf.lastApplied + 1; i < len(rf.log) && i <= args.LeaderCommit; i++ {
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      rf.log[i].Command,
 				CommandIndex: i}
+			rf.lastApplied++
 		}
 		DPrintf(dLog2, "S%d, appendEntries recieved from %d - update leadercommit from %d to %d", rf.me, args.LeaderId, rf.commitIndex, args.LeaderCommit)
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
@@ -402,6 +405,8 @@ func (rf *Raft) sendLogsToServers() {
 		}
 
 		go func(serverIdx int) {
+			rf.waitGoroutines.Add(1)
+			defer rf.waitGoroutines.Done()
 			// If last log index ≥ nextIndex for a follower: send
 			// AppendEntries RPC with log entries starting at nextIndex
 			// • If successful: update nextIndex and matchIndex for follower
@@ -489,6 +494,9 @@ func (rf *Raft) commitConditionMetInteger() int {
 }
 
 func (rf *Raft) updateCommitLoop() {
+	rf.waitGoroutines.Add(1)
+	defer rf.waitGoroutines.Done()
+
 	for !rf.killed() {
 		rf.applyChCond.L.Lock()
 		newCommitIdx := -1
@@ -504,6 +512,14 @@ func (rf *Raft) updateCommitLoop() {
 			rf.applyChCond.Wait()
 			if rf.killed() {
 				DPrintf(dInfo, "S%d, kill updateCommitLoop", rf.me)
+				var last5Logs []Log
+				if len(rf.log) > 5 {
+					last5Logs = rf.log[len(rf.log)-5:]
+				} else {
+					last5Logs = rf.log
+				}
+				DPrintf(dTrace, "S%d, kill state - term: %d, voted: %d, last5logs: %d, loglen: %d, commit: %d, lastApplied: %d", rf.me, rf.currentTerm, rf.votedFor, last5Logs, len(rf.log), rf.commitIndex, rf.lastApplied)
+
 				rf.sendLogsCond.L.Unlock()
 				return
 			}
@@ -511,11 +527,12 @@ func (rf *Raft) updateCommitLoop() {
 
 		if rf.commitIndex < newCommitIdx {
 			// applyCh for leader
-			for i := rf.commitIndex + 1; i <= newCommitIdx; i++ {
+			for i := rf.lastApplied + 1; i <= newCommitIdx; i++ {
 				rf.applyCh <- ApplyMsg{
 					CommandValid: true,
 					Command:      rf.log[i].Command,
 					CommandIndex: i}
+				rf.lastApplied++
 			}
 			DPrintf(dLog2, "S%d, update leadercommit from %d to %d", rf.me, rf.commitIndex, newCommitIdx)
 			rf.commitIndex = newCommitIdx
@@ -540,6 +557,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.sendLogsCond.Broadcast()
 	rf.applyChCond.Broadcast()
+	rf.waitGoroutines.Wait()
 }
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
@@ -550,6 +568,9 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
+	rf.waitGoroutines.Add(1)
+	defer rf.waitGoroutines.Done()
+
 	for !rf.killed() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -769,7 +790,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	go rf.sendLogsToServers()
+	rf.sendLogsToServers()
 	go rf.updateCommitLoop()
 	return rf
 }
