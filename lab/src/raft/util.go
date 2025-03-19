@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -78,4 +79,21 @@ func copyLog(a []Log) []Log {
 	b := make([]Log, len(a))
 	copy(b, a)
 	return b
+}
+
+// These functions assume lock is held outside
+func condWaitOrSkip(cond *sync.Cond, condSkip *bool) {
+	if !*condSkip {
+		cond.Wait() // then condSkip might have been set
+	}
+	*condSkip = false
+}
+
+func condBroadcastAndSetSkip(cond *sync.Cond, condSkip *bool) {
+	*condSkip = true
+	cond.Broadcast()
+}
+
+func BoolPointer(b bool) *bool {
+	return &b
 }

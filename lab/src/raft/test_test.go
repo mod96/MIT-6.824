@@ -1125,11 +1125,11 @@ const MAXLOGSIZE = 2000
 func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash bool) {
 	iters := 30
 	servers := 3
-	cfg := make_config(t, servers, !reliable, true)
+	cfg := make_config(t, servers, !reliable, true) // snapshot is goroutine
 	defer cfg.cleanup()
 
 	cfg.begin(name)
-
+	DPrintf(dTest, "Check one total agreement")
 	cfg.one(rand.Int(), servers, true)
 	leader1 := cfg.checkOneLeader()
 
@@ -1151,6 +1151,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		// perhaps send enough to get a snapshot
+		DPrintf(dTest, "Sending enough msgs to make snapshot. Current sender: S%d", sender)
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
 			cfg.rafts[sender].Start(rand.Int())
@@ -1161,6 +1162,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// make sure all followers have caught up, so that
 			// an InstallSnapshot RPC isn't required for
 			// TestSnapshotBasic2D().
+			DPrintf(dTest, "Check one total agreement after sending snapshot")
 			cfg.one(rand.Int(), servers, true)
 		} else {
 			cfg.one(rand.Int(), servers-1, true)

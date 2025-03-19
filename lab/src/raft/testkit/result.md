@@ -127,3 +127,14 @@ sys     0m1.806s
 │ 2C   │      0 │    50 │ 151.05 ± 7.34 │
 └──────┴────────┴───────┴───────────────┘
 ```
+
+### 2D
+
+```
+VERBOSE=1 go test -run TestSnapshotBasic2D > out
+python ./testkit/dslogs.py ./out -c 3
+python ./testkit/dstest.py -p 1 -n 1 -o ./testkit TestSnapshotBasic2D
+```
+
+
+

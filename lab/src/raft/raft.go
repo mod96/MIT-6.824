@@ -89,11 +89,13 @@ type Raft struct {
 	leaderIdx     int
 	lastHeartBeat time.Time // last heartbeat the leader has sent
 
-	applyCh      chan ApplyMsg
-	applyChCond  *sync.Cond
-	sendLogsCond *sync.Cond
+	applyCh          chan ApplyMsg
+	applyChCond      *sync.Cond
+	applyChCondSkip  *bool
+	sendLogsCond     *sync.Cond
+	sendLogsCondSkip *bool
 
-	waitGoroutines sync.WaitGroup
+	X int // log index starting point
 }
 
 // return currentTerm and whether this server
@@ -156,6 +158,43 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	// The index argument indicates the highest log entry that's reflected in the snapshot.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	DPrintf(dSnap, "S%d, recieved snapshot with index %d", rf.me, index)
+
+	rf.log = rf.log[index-rf.X:]
+	rf.X = index
+	// To prevent index out of range, update rf.nextIndex
+	// Now, InstallSnapshot ticker should send snapshot to other long-behind servers.
+	// Not modifying rf.matchIndex here. InstallSnapshot ticker should handle that. It's important for updating commit index
+	for serverIdx := range rf.peers {
+		rf.nextIndex[serverIdx] = index + 1
+	}
+}
+
+type InstallSnapshotArgs struct {
+	Term              int      // leader’s term
+	LeaderId          int      // so follower can redirect clients
+	LastIncludedIndex int      // the snapshot replaces all entries up through and including this index
+	LastIncludedTerm  int      // term of lastIncludedIndex
+	Data              [][]byte // raw bytes of the snapshot chunk, whole chunk
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+// Invoked by leader to send chunks of a snapshot to a follower.
+// Leaders always send chunks in order.
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
 }
 
 // **************************************************************************** RequestVote
@@ -209,7 +248,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
 		((rf.log[len(rf.log)-1].Term < args.LastLogTerm) ||
-			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 <= args.LastLogIndex)) {
+			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && rf.X+len(rf.log)-1 <= args.LastLogIndex)) {
 		DPrintf(dVote, "S%d, grant vote from %d, term %d", rf.me, args.CandidateId, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = args.CandidateId
@@ -311,7 +350,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		needPersist = true
 	}
 	// description 2
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= rf.X+len(rf.log) || rf.log[args.PrevLogIndex-rf.X].Term != args.PrevLogTerm {
 		DPrintf(dLog, "S%d, appendEntries recieved from %d - we need to go back from PrevLogIndex %d", rf.me, args.LeaderId, args.PrevLogIndex)
 		reply.Success = false
 		return
@@ -319,34 +358,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// description 3 & 4
 	st := args.PrevLogIndex + 1
 	for i, entry := range args.Entries {
-		if st+i >= len(rf.log) {
+		if st+i >= rf.X+len(rf.log) {
 			rf.log = append(rf.log, args.Entries[i:]...)
 			needPersist = true
 			break
 		}
-		if st+i < len(rf.log) &&
-			(rf.log[st+i].Term != entry.Term ||
-				rf.log[st+i].Command != entry.Command) {
-			rf.log = append(rf.log[:st+i], args.Entries[i:]...)
+		if st+i < rf.X+len(rf.log) &&
+			(rf.log[st+i-rf.X].Term != entry.Term ||
+				rf.log[st+i-rf.X].Command != entry.Command) {
+			rf.log = append(rf.log[:st+i-rf.X], args.Entries[i:]...)
 			needPersist = true
 			break
 		}
 	}
 	if args.Entries != nil {
-		DPrintf(dTrace, "S%d, appendEntries recieved from %d - now log is len %d and commit is %d", rf.me, args.LeaderId, len(rf.log), rf.commitIndex)
+		DPrintf(dTrace, "S%d, appendEntries recieved from %d - now log is len %d and commit is %d", rf.me, args.LeaderId, rf.X+len(rf.log), rf.commitIndex)
 	}
 	// description 5
 	if args.PrevLogIndex >= args.LeaderCommit && args.LeaderCommit > rf.commitIndex {
 		// send newly commited logs to applyCh
-		for i := rf.lastApplied + 1; i < len(rf.log) && i <= args.LeaderCommit; i++ {
+		for i := rf.lastApplied + 1; i < rf.X+len(rf.log) && i <= args.LeaderCommit; i++ {
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log[i].Command,
+				Command:      rf.log[i-rf.X].Command,
 				CommandIndex: i}
 			rf.lastApplied++
 		}
 		DPrintf(dLog2, "S%d, appendEntries recieved from %d - update leadercommit from %d to %d", rf.me, args.LeaderId, rf.commitIndex, args.LeaderCommit)
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.commitIndex = min(args.LeaderCommit, rf.X+len(rf.log)-1)
 	}
 	reply.Success = true
 }
@@ -377,7 +416,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	index := len(rf.log)
+	index := rf.X + len(rf.log)
 	term := rf.currentTerm
 	isLeader := true
 
@@ -387,9 +426,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist()
 
 	// signal sendLogsToServers
-	rf.sendLogsCond.Broadcast()
+	condBroadcastAndSetSkip(rf.sendLogsCond, rf.sendLogsCondSkip)
 	DPrintf(dLeader, "S%d, nextIndex are %v while matchIndex are %v", rf.me, rf.nextIndex, rf.matchIndex)
-	DPrintf(dTrace, "S%d, log is len %d and commit is %d", rf.me, len(rf.log), rf.commitIndex)
+	DPrintf(dTrace, "S%d, log is len %d and commit is %d", rf.me, rf.X+len(rf.log), rf.commitIndex)
 
 	return index, term, isLeader
 }
@@ -405,8 +444,7 @@ func (rf *Raft) sendLogsToServers() {
 		}
 
 		go func(serverIdx int) {
-			rf.waitGoroutines.Add(1)
-			defer rf.waitGoroutines.Done()
+			defer DPrintf(dInfo, "S%d, kill sendLogsToServer %d", rf.me, serverIdx)
 			// If last log index ≥ nextIndex for a follower: send
 			// AppendEntries RPC with log entries starting at nextIndex
 			// • If successful: update nextIndex and matchIndex for follower
@@ -415,11 +453,10 @@ func (rf *Raft) sendLogsToServers() {
 			for !rf.killed() {
 				rf.sendLogsCond.L.Lock()
 				// only proceed when it's leader and there are more logs to send
-				for rf.state != Leader || len(rf.log) == 1 || rf.nextIndex[serverIdx] == len(rf.log) {
+				for rf.state != Leader || rf.X+len(rf.log) == 1 || rf.nextIndex[serverIdx] == rf.X+len(rf.log) {
 					DPrintf(dInfo, "S%d, i have nothing to do with sending logs to %d", rf.me, serverIdx)
-					rf.sendLogsCond.Wait()
+					condWaitOrSkip(rf.sendLogsCond, rf.sendLogsCondSkip)
 					if rf.killed() {
-						DPrintf(dInfo, "S%d, kill sendLogsToServer %d", rf.me, serverIdx)
 						rf.sendLogsCond.L.Unlock()
 						return
 					}
@@ -430,8 +467,8 @@ func (rf *Raft) sendLogsToServers() {
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[serverIdx] - 1,
-					PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1].Term,
-					Entries:      copyLog(rf.log[rf.nextIndex[serverIdx]:]),
+					PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1-rf.X].Term,
+					Entries:      copyLog(rf.log[rf.nextIndex[serverIdx]-rf.X:]),
 					LeaderCommit: rf.commitIndex,
 				}
 				// unlock
@@ -456,7 +493,7 @@ func (rf *Raft) sendLogsToServers() {
 					if reply.Success {
 						rf.matchIndex[serverIdx] = appendEntriesArgs.PrevLogIndex + len(appendEntriesArgs.Entries)
 						rf.nextIndex[serverIdx] = appendEntriesArgs.PrevLogIndex + len(appendEntriesArgs.Entries) + 1
-						rf.applyChCond.Broadcast()
+						condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
 					} else if rf.nextIndex[serverIdx] > 1 {
 						DPrintf(dLeader, "S%d, sending log(s) to %d failed", rf.me, serverIdx)
 						rf.nextIndex[serverIdx]--
@@ -464,7 +501,6 @@ func (rf *Raft) sendLogsToServers() {
 				}
 				rf.mu.Unlock()
 			}
-
 		}(serverIdx)
 	}
 }
@@ -476,13 +512,13 @@ func (rf *Raft) commitConditionMetInteger() int {
 
 	// lock is already held by the caller
 	DPrintf(dLeader, "S%d Leader, checking new commit. currentCommit: %d, matchIndex: %v, nextIndex: %v", rf.me, rf.commitIndex, rf.matchIndex, rf.nextIndex)
-	for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
+	for i := rf.X + len(rf.log) - 1; i > rf.commitIndex; i-- {
 		count := 1
 		for serverIdx := range rf.peers {
 			if serverIdx == rf.me {
 				continue
 			}
-			if i <= rf.matchIndex[serverIdx] && rf.log[i].Term == rf.currentTerm {
+			if i <= rf.matchIndex[serverIdx] && rf.log[i-rf.X].Term == rf.currentTerm {
 				count++
 				if count > len(rf.peers)/2 {
 					return i
@@ -494,8 +530,7 @@ func (rf *Raft) commitConditionMetInteger() int {
 }
 
 func (rf *Raft) updateCommitLoop() {
-	rf.waitGoroutines.Add(1)
-	defer rf.waitGoroutines.Done()
+	defer DPrintf(dInfo, "S%d, kill updateCommitLoop", rf.me)
 
 	for !rf.killed() {
 		rf.applyChCond.L.Lock()
@@ -509,9 +544,10 @@ func (rf *Raft) updateCommitLoop() {
 				}
 				DPrintf(dLeader, "S%d Leader, commit not updating.", rf.me)
 			}
-			rf.applyChCond.Wait()
+			if !rf.killed() { // this could lead to stale thread, but let's leave it this way for simplicity
+				condWaitOrSkip(rf.applyChCond, rf.applyChCondSkip)
+			}
 			if rf.killed() {
-				DPrintf(dInfo, "S%d, kill updateCommitLoop", rf.me)
 				var last5Logs []Log
 				if len(rf.log) > 5 {
 					last5Logs = rf.log[len(rf.log)-5:]
@@ -524,13 +560,13 @@ func (rf *Raft) updateCommitLoop() {
 				return
 			}
 		}
-
+		DPrintf(dLog2, "S%d, rf.commitIndex: %d, newCommitIdx: %d, rf.lastApplied: %d", rf.me, rf.commitIndex, newCommitIdx, rf.lastApplied)
 		if rf.commitIndex < newCommitIdx {
 			// applyCh for leader
 			for i := rf.lastApplied + 1; i <= newCommitIdx; i++ {
 				rf.applyCh <- ApplyMsg{
 					CommandValid: true,
-					Command:      rf.log[i].Command,
+					Command:      rf.log[i-rf.X].Command,
 					CommandIndex: i}
 				rf.lastApplied++
 			}
@@ -553,11 +589,12 @@ func (rf *Raft) updateCommitLoop() {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
+	DPrintf(dClient, "kill %d", rf.me)
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.sendLogsCond.Broadcast()
-	rf.applyChCond.Broadcast()
-	rf.waitGoroutines.Wait()
+	condBroadcastAndSetSkip(rf.sendLogsCond, rf.sendLogsCondSkip)
+	condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
+	// rf.waitGoroutines.Wait() // this slows things down and not realistic also
 }
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
@@ -568,9 +605,6 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	rf.waitGoroutines.Add(1)
-	defer rf.waitGoroutines.Done()
-
 	for !rf.killed() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -579,10 +613,10 @@ func (rf *Raft) ticker() {
 		if rf.state == Leader {
 			rf.mu.Unlock()
 			rf.sendHeartbeat()
-			time.Sleep(100 * time.Millisecond) // 100 milliseconds
+			time.Sleep(150 * time.Millisecond) // 150 milliseconds
 		} else {
 			rf.mu.Unlock()
-			n := rand.Intn(150) + 200 // 200 ~ 250 milliseconds
+			n := rand.Intn(150) + 250 // 250 ~ 400 milliseconds
 			rf.sleepWhileCheckingLeader(n)
 
 			rf.mu.Lock()
@@ -603,7 +637,7 @@ func (rf *Raft) ticker() {
 				rf.state = Candidate
 
 				currentTerm := rf.currentTerm
-				logIndex := len(rf.log) - 1
+				logIndex := rf.X + len(rf.log) - 1
 				logTerm := rf.log[len(rf.log)-1].Term
 
 				rf.mu.Unlock() // Unlock before spawning goroutines to avoid deadlocks
@@ -687,7 +721,7 @@ func (rf *Raft) sendHeartbeat() {
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: rf.nextIndex[serverIdx] - 1,
-			PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1].Term,
+			PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1-rf.X].Term,
 			Entries:      []Log{},
 			LeaderCommit: rf.commitIndex})
 	}
@@ -765,18 +799,21 @@ func (rf *Raft) sleepWhileCheckingLeader(n int) {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-
+	DPrintf(dClient, "make %d", me)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.me = me
 	rf.persister = persister
 	rf.applyCh = applyCh
 	rf.applyChCond = sync.NewCond(&rf.mu)
+	rf.applyChCondSkip = BoolPointer(false)
 	rf.sendLogsCond = sync.NewCond(&rf.mu)
+	rf.sendLogsCondSkip = BoolPointer(false)
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]Log, 1) // initialize log with an empty entry at index 0
+	rf.X = 0
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
