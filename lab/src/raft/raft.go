@@ -159,19 +159,24 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	// The index argument indicates the highest log entry that's reflected in the snapshot.
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	// Caller(config.applierSnap) calls this synchronously. But this makes deadlock.
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 
-	DPrintf(dSnap, "S%d, recieved snapshot with index %d", rf.me, index)
+		DPrintf(dSnap, "S%d, recieved snapshot with index %d", rf.me, index)
 
-	rf.log = rf.log[index-rf.X:]
-	rf.X = index
-	// To prevent index out of range, update rf.nextIndex
-	// Now, InstallSnapshot ticker should send snapshot to other long-behind servers.
-	// Not modifying rf.matchIndex here. InstallSnapshot ticker should handle that. It's important for updating commit index
-	for serverIdx := range rf.peers {
-		rf.nextIndex[serverIdx] = index + 1
-	}
+		rf.log = rf.log[index-rf.X:]
+		rf.X = index
+		// To prevent index out of range, update rf.nextIndex
+		// Now, InstallSnapshot ticker should send snapshot to other long-behind servers.
+		// Not modifying rf.matchIndex here. InstallSnapshot ticker should handle that. It's important for updating commit index
+		for serverIdx := range rf.peers {
+			if rf.nextIndex[serverIdx] < index+1 {
+				rf.nextIndex[serverIdx] = index + 1
+			}
+		}
+	}()
 }
 
 type InstallSnapshotArgs struct {
@@ -494,7 +499,7 @@ func (rf *Raft) sendLogsToServers() {
 						rf.matchIndex[serverIdx] = appendEntriesArgs.PrevLogIndex + len(appendEntriesArgs.Entries)
 						rf.nextIndex[serverIdx] = appendEntriesArgs.PrevLogIndex + len(appendEntriesArgs.Entries) + 1
 						condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
-					} else if rf.nextIndex[serverIdx] > 1 {
+					} else if rf.nextIndex[serverIdx] > rf.X+1 {
 						DPrintf(dLeader, "S%d, sending log(s) to %d failed", rf.me, serverIdx)
 						rf.nextIndex[serverIdx]--
 					}
@@ -562,6 +567,7 @@ func (rf *Raft) updateCommitLoop() {
 		}
 		DPrintf(dLog2, "S%d, rf.commitIndex: %d, newCommitIdx: %d, rf.lastApplied: %d", rf.me, rf.commitIndex, newCommitIdx, rf.lastApplied)
 		if rf.commitIndex < newCommitIdx {
+			DPrintf(dLog2, "S%d, WTF", rf.me)
 			// applyCh for leader
 			for i := rf.lastApplied + 1; i <= newCommitIdx; i++ {
 				rf.applyCh <- ApplyMsg{
@@ -756,7 +762,7 @@ func (rf *Raft) reInitializeVolatileStates() {
 	// Suppose lock is held by the caller
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
-		rf.nextIndex[i] = 1
+		rf.nextIndex[i] = rf.X + 1
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.sendLogsCond.Broadcast()

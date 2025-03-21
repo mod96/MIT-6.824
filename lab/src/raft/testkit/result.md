@@ -3,7 +3,6 @@ https://blog.josejg.com/debugging-pretty/
 ```
 cd raft
 source ./testkit/.venv/bin/activate
-python ./testkit/dslogs.py ./testkit/TestBasicAgree2B_10.log -c 3
 ```
 
 
