@@ -557,8 +557,8 @@ func (rf *Raft) sendLogsToServers() {
 			// • If AppendEntries fails because of log inconsistency:
 			// decrement nextIndex and retry
 
-			retry := false
 			for !rf.killed() {
+				retry := false
 				rf.sendLogsCond.L.Lock()
 				// only proceed when it's leader and there are more logs to send
 				for rf.state != Leader || rf.X+len(rf.log) == 1 || rf.nextIndex[serverIdx] >= rf.X+len(rf.log) {
@@ -585,28 +585,29 @@ func (rf *Raft) sendLogsToServers() {
 				reply := &AppendEntriesReply{}
 				if !rf.sendAppendEntries(serverIdx, &appendEntriesArgs, reply) {
 					retry = true
+				} else {
+					// Re-locking if we modify shared state
+					rf.mu.Lock()
+					// Rules for Servers
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.state = Follower
+						rf.votedFor = -1
+						rf.lastHeartBeat = time.Now()
+						rf.persist()
+					}
+					// Am i still leader?
+					if rf.state == Leader {
+						// If succeeded, update
+						retry = rf.afterSendAppendEntries(reply, serverIdx, appendEntriesArgs, retry)
+					}
+					rf.mu.Unlock()
 				}
-
-				// Re-locking if we modify shared state
-				rf.mu.Lock()
-				// Rules for Servers
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.state = Follower
-					rf.votedFor = -1
-					rf.lastHeartBeat = time.Now()
-					rf.persist()
-				}
-				// Am i still leader?
-				if rf.state == Leader {
-					// If succeeded, update
-					retry = rf.afterSendAppendEntries(reply, serverIdx, appendEntriesArgs, retry)
-				}
-				// retry if one rpc failed
 				if retry {
+					rf.mu.Lock()
 					rf.sendLogsCondSkip = BoolPointer(true)
+					rf.mu.Unlock()
 				}
-				rf.mu.Unlock()
 			}
 		}(serverIdx)
 	}
@@ -721,8 +722,10 @@ func (rf *Raft) Kill() {
 	DPrintf(dClient, "kill %d", rf.me)
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.mu.Lock()
 	condBroadcastAndSetSkip(rf.sendLogsCond, rf.sendLogsCondSkip)
 	condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
+	rf.mu.Unlock()
 	// rf.waitGoroutines.Wait() // this slows things down and not realistic also
 }
 func (rf *Raft) killed() bool {
@@ -742,10 +745,10 @@ func (rf *Raft) ticker() {
 		if rf.state == Leader {
 			rf.mu.Unlock()
 			rf.sendHeartbeat()
-			time.Sleep(150 * time.Millisecond) // 150 milliseconds
+			time.Sleep(120 * time.Millisecond) // 120 milliseconds
 		} else {
 			rf.mu.Unlock()
-			n := rand.Intn(150) + 250 // 250 ~ 400 milliseconds
+			n := rand.Intn(150) + 200 // 200 ~ 350 milliseconds
 			rf.sleepWhileCheckingLeader(n)
 
 			rf.mu.Lock()
