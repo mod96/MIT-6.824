@@ -1142,10 +1142,12 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		if disconnect {
+			DPrintf(dTest, "iter %d, Disconnect %d", i, victim)
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
+			DPrintf(dTest, "iter %d, Crash %d", i, victim)
 			cfg.crash1(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
@@ -1165,6 +1167,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			DPrintf(dTest, "iter %d, Check one total agreement after sending Many msgs", i)
 			cfg.one(rand.Int(), servers, true)
 		} else {
+			DPrintf(dTest, "iter %d, Check one total agreement except victim %d after sending Many msgs", i, victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 
@@ -1174,11 +1177,13 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		if disconnect {
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a snapshot to catch up.
+			DPrintf(dTest, "iter %d, Reconnect %d", i, victim)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
+			DPrintf(dTest, "iter %d, Remake %d", i, victim)
 			cfg.start1(victim, cfg.applierSnap)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)

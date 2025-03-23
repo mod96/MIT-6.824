@@ -129,10 +129,20 @@ sys     0m1.806s
 
 ### 2D
 
+In this case, InstallSnapshot RPC NEEDS success/failure flag at reply since old snapshot install can fail repeatedly.
+
 ```
 VERBOSE=1 go test -run TestSnapshotBasic2D > out
 python ./testkit/dslogs.py ./out -c 3
-python ./testkit/dstest.py -p 1 -n 1 -o ./testkit TestSnapshotBasic2D
+
+
+VERBOSE=1 go test -run TestSnapshotInstall2D
+
+python ./testkit/dstest.py -p 1 -n 1 -o ./testkit TestSnapshotInstall2D
+python ./testkit/dslogs.py ./testkit/TestSnapshotInstall2D_0.log -c 3
+
+python ./testkit/dstest.py -p 1 -n 1 -o ./testkit TestSnapshotInstallUnreliable2D
+python ./testkit/dslogs.py ./testkit/TestSnapshotInstallUnreliable2D_6.log -c 3
 ```
 
 
