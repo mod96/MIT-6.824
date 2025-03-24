@@ -112,15 +112,23 @@ func (rf *Raft) GetState() (int, bool) {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-func (rf *Raft) persist() {
-	// Your code here (2C).
+func (rf *Raft) getRaftState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.X)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	return data
+}
+func (rf *Raft) persist() {
+	// Your code here (2C).
+	rf.persister.SaveRaftState(rf.getRaftState())
+}
+
+func (rf *Raft) persistStateAndSnapshot() {
+	rf.persister.SaveStateAndSnapshot(rf.getRaftState(), rf.snapshot)
 }
 
 // restore previously persisted state.
@@ -134,14 +142,34 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []Log
+	var X int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil ||
+		d.Decode(&X) != nil {
 		DPrintf(dError, "S%d readPersist decoding error", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.X = X
+	}
+	// Restart from snapshot
+	rf.snapshot = rf.persister.ReadSnapshot()
+	if rf.X > 0 {
+		rf.lastApplied = rf.X
+		rf.commitIndex = rf.X
+		// applier is not ready yet. Just spawn goroutine and let it happen.
+		go func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			rf.applyCh <- ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.snapshot,
+				SnapshotTerm:  rf.log[0].Term,
+				SnapshotIndex: rf.X,
+			}
+		}()
 	}
 }
 
@@ -173,6 +201,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log = rf.log[index-rf.X:]
 		rf.X = index
 		rf.snapshot = snapshot
+		if rf.lastApplied < rf.X {
+			rf.lastApplied = rf.X
+		}
+		rf.persistStateAndSnapshot()
 		// To prevent index out of range, update rf.nextIndex
 		// Now, InstallSnapshot ticker should send snapshot to other long-behind servers.
 		// Not modifying rf.matchIndex here. InstallSnapshot ticker should handle that. It's important for updating commit index
@@ -206,7 +238,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	needPersist := false
 	defer func() {
 		if needPersist {
-			rf.persist()
+			rf.persistStateAndSnapshot()
 		}
 	}()
 
@@ -410,8 +442,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term             int  // currentTerm, for leader to update itself
+	Success          bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	PrevLogIndex     int  // Could be modified by follower
+	AppendEntriesLen int  // Could be modified by follower
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -449,12 +483,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = args.LeaderId // if only leader can send this...
 		needPersist = true
 	}
-	// preceding of description 2 in 2D
+	// **1 Maybe this can help. rf.X is guaranteed to be committed (really? after delay?)
+	reply.PrevLogIndex = args.PrevLogIndex
 	if args.PrevLogIndex < rf.X {
-		DPrintf(dLog, "S%d, appendEntries recieved from %d - is too old. PrevLogIndex %d, rf.X %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.X)
-		reply.Success = false
-		return
+		if args.PrevLogIndex+len(args.Entries) <= rf.X { // maybe delayed, even not containing committed entries can come
+			DPrintf(dLog, "S%d, appendEntries recieved from %d - entries are too old. args.PrevLogIndex: %d, len(args.Entries): %d, rf.X: %d", rf.me, args.LeaderId, args.PrevLogIndex, len(args.Entries), rf.X)
+			reply.Success = false
+			return
+		} else {
+			args.Entries = args.Entries[rf.X-args.PrevLogIndex:]
+		}
+		args.PrevLogIndex = rf.X
+		args.PrevLogTerm = rf.log[0].Term
+		reply.PrevLogIndex = rf.X
+		DPrintf(dLog, "S%d, appendEntries recieved from %d - modified. args.PrevLogIndex: %d, len(args.Entries): %d, rf.X: %d", rf.me, args.LeaderId, args.PrevLogIndex, len(args.Entries), rf.X)
 	}
+	reply.AppendEntriesLen = len(args.Entries)
 	// description 2
 	if args.PrevLogIndex >= rf.X+len(rf.log) || rf.log[args.PrevLogIndex-rf.X].Term != args.PrevLogTerm {
 		DPrintf(dLog, "S%d, appendEntries recieved from %d - we need to go back from PrevLogIndex %d", rf.me, args.LeaderId, args.PrevLogIndex)
@@ -469,7 +513,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			needPersist = true
 			break
 		}
-		if st+i < rf.X+len(rf.log) &&
+		if rf.X <= st+i && st+i < rf.X+len(rf.log) &&
 			(rf.log[st+i-rf.X].Term != entry.Term ||
 				rf.log[st+i-rf.X].Command != entry.Command) {
 			rf.log = append(rf.log[:st+i-rf.X], args.Entries[i:]...)
@@ -599,7 +643,25 @@ func (rf *Raft) sendLogsToServers() {
 					// Am i still leader?
 					if rf.state == Leader {
 						// If succeeded, update
-						retry = rf.afterSendAppendEntries(reply, serverIdx, appendEntriesArgs, retry)
+						if reply.Success {
+							// long delayed response might try to change this later
+							DPrintf(dLeader, "S%d, sending log(s) to %d succeed. PLI: %d, AEL: %d", rf.me, serverIdx, reply.PrevLogIndex, reply.AppendEntriesLen)
+							if rf.nextIndex[serverIdx] < reply.PrevLogIndex+reply.AppendEntriesLen+1 {
+								rf.matchIndex[serverIdx] = reply.PrevLogIndex + reply.AppendEntriesLen
+								rf.nextIndex[serverIdx] = reply.PrevLogIndex + reply.AppendEntriesLen + 1
+							}
+							condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
+						} else if rf.nextIndex[serverIdx] > rf.X+1 {
+							DPrintf(dLeader, "S%d, sending log(s) to %d failed", rf.me, serverIdx)
+							// long delayed response might try to change this later
+							if rf.nextIndex[serverIdx]-1 == reply.PrevLogIndex {
+								rf.nextIndex[serverIdx] = reply.PrevLogIndex
+							}
+						} else {
+							if !rf.sendInstallSnapshot(serverIdx) {
+								retry = true
+							}
+						}
 					}
 					rf.mu.Unlock()
 				}
@@ -611,28 +673,6 @@ func (rf *Raft) sendLogsToServers() {
 			}
 		}(serverIdx)
 	}
-}
-
-func (rf *Raft) afterSendAppendEntries(reply *AppendEntriesReply, serverIdx int, appendEntriesArgs AppendEntriesArgs, retry bool) bool {
-	if reply.Success {
-		// long delayed response might try to change this later
-		if rf.nextIndex[serverIdx] < appendEntriesArgs.PrevLogIndex+len(appendEntriesArgs.Entries)+1 {
-			rf.matchIndex[serverIdx] = appendEntriesArgs.PrevLogIndex + len(appendEntriesArgs.Entries)
-			rf.nextIndex[serverIdx] = appendEntriesArgs.PrevLogIndex + len(appendEntriesArgs.Entries) + 1
-		}
-		condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
-	} else if rf.nextIndex[serverIdx] > rf.X+1 {
-		DPrintf(dLeader, "S%d, sending log(s) to %d failed", rf.me, serverIdx)
-		// long delayed response might try to change this later
-		if rf.nextIndex[serverIdx]-1 == appendEntriesArgs.PrevLogIndex {
-			rf.nextIndex[serverIdx] = appendEntriesArgs.PrevLogIndex
-		}
-	} else {
-		if !rf.sendInstallSnapshot(serverIdx) {
-			retry = true
-		}
-	}
-	return retry
 }
 
 func (rf *Raft) commitConditionMetInteger() int {
@@ -842,6 +882,16 @@ func (rf *Raft) sendHeartbeat() {
 		rf.mu.Unlock()
 		return
 	}
+	// Notify sendLogsToServers periodically, in case it failed since network drop
+	for serverIdx := range rf.peers {
+		if serverIdx == rf.me {
+			continue
+		}
+		if rf.X+len(rf.log) > 1 && rf.nextIndex[serverIdx] < rf.X+len(rf.log) {
+			condBroadcastAndSetSkip(rf.sendLogsCond, rf.sendLogsCondSkip)
+			break
+		}
+	}
 
 	DPrintf(dLeader, "S%d Leader, checking heartbeats in term %d", rf.me, rf.currentTerm)
 	DPrintf(dTrace, "S%d Leader, rf.nextIndex: %v, rf.X: %d, len(rf.log): %d", rf.me, rf.nextIndex, rf.X, len(rf.log))
@@ -879,9 +929,6 @@ func (rf *Raft) sendHeartbeat() {
 				rf.lastHeartBeat = time.Now()
 				rf.persist()
 			}
-			if rf.state == Leader {
-				rf.afterSendAppendEntries(reply, serverIdx, appendEntriesArgsSlice[serverIdx], false)
-			}
 			rf.mu.Unlock()
 		}(serverIdx)
 	}
@@ -892,7 +939,9 @@ func (rf *Raft) reInitializeVolatileStates() {
 	// Suppose lock is held by the caller
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
-		rf.nextIndex[i] = len(rf.log) + rf.X
+		// Makes faster to catch up. Especially for 2C.
+		// For 2D, this made **1 necessary
+		rf.nextIndex[i] = rf.X + 1
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.sendLogsCond.Broadcast()
