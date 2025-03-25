@@ -145,5 +145,34 @@ python ./testkit/dstest.py -p 1 -n 1 -o ./testkit TestSnapshotInstallUnreliable2
 python ./testkit/dslogs.py ./testkit/TestSnapshotInstallUnreliable2D_6.log -c 3
 ```
 
+Well,,,,at least it works....?
+
+```
+(.venv) ~$ time go test -run 2D
+Test (2D): snapshots basic ...
+  ... Passed --   3.2  3  144   49911  218
+Test (2D): install snapshots (disconnect) ...
+--- FAIL: TestSnapshotInstall2D (123.62s)
+    config.go:339: test took longer than 120 seconds
+Test (2D): install snapshots (disconnect+unreliable) ...
+--- FAIL: TestSnapshotInstallUnreliable2D (121.55s)
+    config.go:339: test took longer than 120 seconds
+Test (2D): install snapshots (crash) ...
+--- FAIL: TestSnapshotInstallCrash2D (122.38s)
+    config.go:339: test took longer than 120 seconds
+Test (2D): install snapshots (unreliable+crash) ...
+--- FAIL: TestSnapshotInstallUnCrash2D (123.76s)
+    config.go:339: test took longer than 120 seconds
+Test (2D): crash and restart all servers ...
+  ... Passed --   6.5  3  282   82528   62
+FAIL
+exit status 1
+FAIL    6.824/raft      500.995s
+
+real    8m53.622s
+user    0m3.956s
+sys     0m2.030s
+```
+
 
 

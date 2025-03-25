@@ -785,10 +785,10 @@ func (rf *Raft) ticker() {
 		if rf.state == Leader {
 			rf.mu.Unlock()
 			rf.sendHeartbeat()
-			time.Sleep(120 * time.Millisecond) // 120 milliseconds
+			time.Sleep(80 * time.Millisecond) // 80 milliseconds
 		} else {
 			rf.mu.Unlock()
-			n := rand.Intn(150) + 200 // 200 ~ 350 milliseconds
+			n := rand.Intn(100) + 200 // 200 ~ 300 milliseconds
 			rf.sleepWhileCheckingLeader(n)
 
 			rf.mu.Lock()
