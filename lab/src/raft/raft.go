@@ -112,6 +112,7 @@ func (rf *Raft) GetState() (int, bool) {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
+// require caller to hold lock
 func (rf *Raft) getRaftState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -122,15 +123,19 @@ func (rf *Raft) getRaftState() []byte {
 	data := w.Bytes()
 	return data
 }
+
+// require caller to hold lock.
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	rf.persister.SaveRaftState(rf.getRaftState())
 }
 
+// require caller to hold lock.
 func (rf *Raft) persistStateAndSnapshot() {
 	rf.persister.SaveStateAndSnapshot(rf.getRaftState(), rf.snapshot)
 }
 
+// require caller to hold lock.
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -157,6 +162,7 @@ func (rf *Raft) readPersist(data []byte) {
 	// Restart from snapshot
 	rf.snapshot = rf.persister.ReadSnapshot()
 	if rf.X > 0 {
+		DPrintf(dError, "S%d read snapshot", rf.me)
 		rf.lastApplied = rf.X
 		rf.commitIndex = rf.X
 		// applier is not ready yet. Just spawn goroutine and let it happen.
@@ -178,6 +184,8 @@ func (rf *Raft) readPersist(data []byte) {
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	// Your code here (2D).
+	// In this test cases, this method is called only when appliedCh recieved msg SnapshotValid,
+	// but this happens only after successfully installed snapshot on raft states.
 	return true
 }
 
@@ -292,21 +300,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	DPrintf(dSnap, "S%d, installSnapshot recieved from %d - updated rf.X = %d, len(rf.log) = %d", rf.me, args.LeaderId, rf.X, len(rf.log))
 }
 
-func (rf *Raft) sendInstallSnapshot(server int) bool {
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) bool {
 	DPrintf(dLeader, "S%d, Sending install snapshot to server %d with rf.X = %d", rf.me, server, rf.X)
-	// Caller already gained lock
-	args := &InstallSnapshotArgs{
-		Term:              rf.currentTerm,
-		LeaderId:          rf.me,
-		LastIncludedIndex: rf.X,
-		LastIncludedTerm:  rf.log[0].Term,
-		Data:              rf.snapshot,
-	}
 	reply := &InstallSnapshotReply{}
-	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-	rf.mu.Lock()
+	// gain lock
 	if ok {
+		rf.mu.Lock()
 		// Rules for Servers
 		if reply.Term > rf.currentTerm {
 			rf.currentTerm = reply.Term
@@ -325,6 +325,7 @@ func (rf *Raft) sendInstallSnapshot(server int) bool {
 				rf.nextIndex[server] = args.LastIncludedIndex + 1
 			}
 		}
+		rf.mu.Unlock()
 	}
 	return ok
 }
@@ -583,13 +584,58 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func (rf *Raft) sendLogsToServers() {
-	rf.mu.Lock()
-	me := rf.me
-	rf.mu.Unlock()
+func (rf *Raft) sendLogsToServer(serverIdx int, appendEntriesArgs *AppendEntriesArgs, installSnapshotArgs *InstallSnapshotArgs) {
+	reply := &AppendEntriesReply{}
+	if appendEntriesArgs != nil && rf.sendAppendEntries(serverIdx, appendEntriesArgs, reply) {
+		// Re-locking if we modify shared state
+		rf.mu.Lock()
+		// Rules for Servers
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.state = Follower
+			rf.votedFor = -1
+			rf.lastHeartBeat = time.Now()
+			rf.persist()
+		}
+		// Am i still leader?
+		if rf.state == Leader {
+			// If succeeded, update
+			if reply.Success {
+				// long delayed response might try to change this later
+				DPrintf(dLeader, "S%d, sending log(s) to %d succeed. PLI: %d, AEL: %d", rf.me, serverIdx, reply.PrevLogIndex, reply.AppendEntriesLen)
+				if rf.nextIndex[serverIdx] < reply.PrevLogIndex+reply.AppendEntriesLen+1 {
+					rf.matchIndex[serverIdx] = reply.PrevLogIndex + reply.AppendEntriesLen
+					rf.nextIndex[serverIdx] = reply.PrevLogIndex + reply.AppendEntriesLen + 1
+				}
+				condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
+			} else if rf.nextIndex[serverIdx] > rf.X+1 {
+				DPrintf(dLeader, "S%d, sending log(s) to %d failed", rf.me, serverIdx)
+				// long delayed response might try to change this later
+				if rf.nextIndex[serverIdx]-1 == reply.PrevLogIndex {
+					rf.nextIndex[serverIdx] = reply.PrevLogIndex
+				}
+			} else {
+				installSnapshotArgs := &InstallSnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.X,
+					LastIncludedTerm:  rf.log[0].Term,
+					Data:              rf.snapshot,
+				}
+				rf.mu.Unlock()
+				rf.sendInstallSnapshot(serverIdx, installSnapshotArgs)
+				rf.mu.Lock()
+			}
+		}
+		rf.mu.Unlock()
+	} else if installSnapshotArgs != nil {
+		rf.sendInstallSnapshot(serverIdx, installSnapshotArgs)
+	}
+}
 
+func (rf *Raft) sendLogsToServers() {
 	for serverIdx := range rf.peers {
-		if serverIdx == me {
+		if serverIdx == rf.me {
 			continue
 		}
 
@@ -602,7 +648,6 @@ func (rf *Raft) sendLogsToServers() {
 			// decrement nextIndex and retry
 
 			for !rf.killed() {
-				retry := false
 				rf.sendLogsCond.L.Lock()
 				// only proceed when it's leader and there are more logs to send
 				for rf.state != Leader || rf.X+len(rf.log) == 1 || rf.nextIndex[serverIdx] >= rf.X+len(rf.log) {
@@ -613,62 +658,31 @@ func (rf *Raft) sendLogsToServers() {
 						return
 					}
 				}
-				DPrintf(dLeader, "S%d, sending log(s) to %d with nextIndex %d", rf.me, serverIdx, rf.nextIndex[serverIdx])
+				DPrintf(dLeader, "S%d, sending log(s) to %d with nextIndex %d, rf.X %d, len(rf.log): %d", rf.me, serverIdx, rf.nextIndex[serverIdx], rf.X, len(rf.log))
 
-				appendEntriesArgs := AppendEntriesArgs{
-					Term:         rf.currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: rf.nextIndex[serverIdx] - 1,
-					PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1-rf.X].Term,
-					Entries:      copyLog(rf.log[rf.nextIndex[serverIdx]-rf.X:]),
-					LeaderCommit: rf.commitIndex,
-				}
-				// unlock
-				rf.sendLogsCond.L.Unlock()
-
-				reply := &AppendEntriesReply{}
-				if !rf.sendAppendEntries(serverIdx, &appendEntriesArgs, reply) {
-					retry = true
+				if rf.X < rf.nextIndex[serverIdx] {
+					appendEntriesArgs := AppendEntriesArgs{
+						Term:         rf.currentTerm,
+						LeaderId:     rf.me,
+						PrevLogIndex: rf.nextIndex[serverIdx] - 1,
+						PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1-rf.X].Term,
+						Entries:      copyLog(rf.log[rf.nextIndex[serverIdx]-rf.X:]),
+						LeaderCommit: rf.commitIndex,
+					}
+					// unlock
+					rf.sendLogsCond.L.Unlock()
+					rf.sendLogsToServer(serverIdx, &appendEntriesArgs, nil)
 				} else {
-					// Re-locking if we modify shared state
-					rf.mu.Lock()
-					// Rules for Servers
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.state = Follower
-						rf.votedFor = -1
-						rf.lastHeartBeat = time.Now()
-						rf.persist()
+					installSnapshotArgs := InstallSnapshotArgs{
+						Term:              rf.currentTerm,
+						LeaderId:          rf.me,
+						LastIncludedIndex: rf.X,
+						LastIncludedTerm:  rf.log[0].Term,
+						Data:              rf.snapshot,
 					}
-					// Am i still leader?
-					if rf.state == Leader {
-						// If succeeded, update
-						if reply.Success {
-							// long delayed response might try to change this later
-							DPrintf(dLeader, "S%d, sending log(s) to %d succeed. PLI: %d, AEL: %d", rf.me, serverIdx, reply.PrevLogIndex, reply.AppendEntriesLen)
-							if rf.nextIndex[serverIdx] < reply.PrevLogIndex+reply.AppendEntriesLen+1 {
-								rf.matchIndex[serverIdx] = reply.PrevLogIndex + reply.AppendEntriesLen
-								rf.nextIndex[serverIdx] = reply.PrevLogIndex + reply.AppendEntriesLen + 1
-							}
-							condBroadcastAndSetSkip(rf.applyChCond, rf.applyChCondSkip)
-						} else if rf.nextIndex[serverIdx] > rf.X+1 {
-							DPrintf(dLeader, "S%d, sending log(s) to %d failed", rf.me, serverIdx)
-							// long delayed response might try to change this later
-							if rf.nextIndex[serverIdx]-1 == reply.PrevLogIndex {
-								rf.nextIndex[serverIdx] = reply.PrevLogIndex
-							}
-						} else {
-							if !rf.sendInstallSnapshot(serverIdx) {
-								retry = true
-							}
-						}
-					}
-					rf.mu.Unlock()
-				}
-				if retry {
-					rf.mu.Lock()
-					rf.sendLogsCondSkip = BoolPointer(true)
-					rf.mu.Unlock()
+					// unlock
+					rf.sendLogsCond.L.Unlock()
+					rf.sendLogsToServer(serverIdx, nil, &installSnapshotArgs)
 				}
 			}
 		}(serverIdx)
@@ -777,6 +791,7 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
+	defer DPrintf(dInfo, "S%d, kill ticker", rf.me)
 	for !rf.killed() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -882,14 +897,31 @@ func (rf *Raft) sendHeartbeat() {
 		rf.mu.Unlock()
 		return
 	}
-	// Notify sendLogsToServers periodically, in case it failed since network drop
+	// Instead of just notifying single threaded loop, just spawn new thread, since req fail timeout is laaarge
 	for serverIdx := range rf.peers {
 		if serverIdx == rf.me {
 			continue
 		}
 		if rf.X+len(rf.log) > 1 && rf.nextIndex[serverIdx] < rf.X+len(rf.log) {
-			condBroadcastAndSetSkip(rf.sendLogsCond, rf.sendLogsCondSkip)
-			break
+			DPrintf(dLeader, "S%d, sending log(s) to %d with nextIndex %d, rf.X %d, len(rf.log): %d", rf.me, serverIdx, rf.nextIndex[serverIdx], rf.X, len(rf.log))
+			if rf.X < rf.nextIndex[serverIdx] {
+				go rf.sendLogsToServer(serverIdx, &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[serverIdx] - 1,
+					PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1-rf.X].Term,
+					Entries:      copyLog(rf.log[rf.nextIndex[serverIdx]-rf.X:]),
+					LeaderCommit: rf.commitIndex,
+				}, nil)
+			} else {
+				go rf.sendLogsToServer(serverIdx, nil, &InstallSnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.X,
+					LastIncludedTerm:  rf.log[0].Term,
+					Data:              rf.snapshot,
+				})
+			}
 		}
 	}
 
@@ -900,11 +932,17 @@ func (rf *Raft) sendHeartbeat() {
 
 	appendEntriesArgsSlice := []AppendEntriesArgs{}
 	for serverIdx := range rf.peers {
+		var prevLogTerm int
+		if rf.nextIndex[serverIdx]-1-rf.X >= 0 {
+			prevLogTerm = rf.log[rf.nextIndex[serverIdx]-1-rf.X].Term
+		} else {
+			prevLogTerm = -1
+		}
 		appendEntriesArgsSlice = append(appendEntriesArgsSlice, AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: rf.nextIndex[serverIdx] - 1,
-			PrevLogTerm:  rf.log[rf.nextIndex[serverIdx]-1-rf.X].Term,
+			PrevLogTerm:  prevLogTerm,
 			Entries:      []Log{},
 			LeaderCommit: rf.commitIndex})
 	}
@@ -944,7 +982,7 @@ func (rf *Raft) reInitializeVolatileStates() {
 		rf.nextIndex[i] = rf.X + 1
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.sendLogsCond.Broadcast()
+	condBroadcastAndSetSkip(rf.sendLogsCond, rf.sendLogsCondSkip)
 }
 
 func (rf *Raft) sleepWhileCheckingLeader(n int) {
