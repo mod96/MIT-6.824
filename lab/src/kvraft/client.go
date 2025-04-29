@@ -1,8 +1,7 @@
 package kvraft
 
 import (
-	"crypto/rand"
-	"math/big"
+	"sync"
 
 	"6.824/labrpc"
 )
@@ -10,19 +9,15 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-}
-
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
-	return x
+	mu        sync.Mutex
+	leaderIdx int
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.leaderIdx = 0
 	return ck
 }
 
@@ -39,9 +34,30 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	for {
+		ck.mu.Lock()
+		leaderIdx := ck.leaderIdx
+		ck.mu.Unlock()
+
+		reply := GetReply{}
+		ok := ck.servers[leaderIdx].Call("KVServer.Get", &GetArgs{Key: key}, &reply)
+		if ok {
+			return reply.Value
+		}
+		switch reply.Err {
+		case ErrNoKey:
+			return ""
+		case ErrWrongLeader:
+			ck.mu.Lock()
+			ck.leaderIdx = reply.LeaderIdx
+			ck.mu.Unlock()
+		default: // timeout. rotate server to another
+			ck.mu.Lock()
+			ck.leaderIdx = (ck.leaderIdx + 1) % len(ck.servers)
+			ck.mu.Unlock()
+		}
+	}
 }
 
 // shared by Put and Append.
@@ -54,6 +70,34 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	for {
+		ck.mu.Lock()
+		leaderIdx := ck.leaderIdx
+		ck.mu.Unlock()
+
+		reply := PutAppendReply{}
+		ok := ck.servers[leaderIdx].Call("KVServer.PutAppend",
+			&PutAppendArgs{
+				Key:   key,
+				Value: value,
+				Op:    op,
+			},
+			&reply)
+		if ok {
+			return
+		}
+		switch reply.Err {
+		case ErrWrongLeader:
+			ck.mu.Lock()
+			ck.leaderIdx = reply.LeaderIdx
+			ck.mu.Unlock()
+		default: // timeout. rotate server to another
+			ck.mu.Lock()
+			ck.leaderIdx = (ck.leaderIdx + 1) % len(ck.servers)
+			ck.mu.Unlock()
+		}
+	}
+
 }
 
 func (ck *Clerk) Put(key string, value string) {
