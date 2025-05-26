@@ -14,10 +14,12 @@ import (
 
 	"6.824/models"
 	"6.824/porcupine"
+	"6.824/raft"
 )
 
 func TestMain(m *testing.M) {
 	DInit()
+	raft.DInit()
 	code := m.Run()
 	os.Exit(code)
 }
