@@ -17,7 +17,7 @@ type Op struct {
 	OpName string
 	Key    string
 	Value  string
-	ID     int // unique ID for the operation, used to deduplicate
+	ReqID  string // unique ID for the operation, used to deduplicate
 }
 
 const (
@@ -40,26 +40,30 @@ type KVServer struct {
 		leaderId int
 		term     int
 	}
-	kvStore map[string]string // key-value store
+	kvStore   map[string]string // key-value store
+	kvStoreMu sync.Mutex        // mutex for kvStore
 
-	canReturn map[int]chan struct{} // map of OpIDs to channels to signal when the operation is done
-	opGen     int64                 // used to generate unique Op IDs
+	canReturn map[string]chan struct{} // map of ReqIDs to channels to signal when the operation is done
+
+	isDone   map[string]bool // map of ReqIDs to whether the operation is done
+	isDoneMu sync.Mutex      // mutex for isDone map
 }
 
 // *********************************** Private server APIs for encapsulated calls
 
-// generate new Op ID.
-func (kv *KVServer) genOpID() int {
-	atomic.AddInt64(&kv.opGen, 1)
-	return int(kv.opGen)
-}
-
 // sendMsg sends a message to the raft server and waits for a reply.
 func (kv *KVServer) sendMsg(op Op) bool {
 	// lock is held outside.
+	kv.isDoneMu.Lock()
+	if kv.isDone[op.ReqID] {
+		kv.isDoneMu.Unlock()
+		DPrintf(dServer, "%d, sendMsg: op=%v already done\n", kv.me, op)
+		return true // operation already done, no need to send again
+	}
+	kv.isDoneMu.Unlock()
 	// send the message to raft
 	// DPrintf(dServer, "%d, sendMsg: op=%v - H1", kv.me, op)
-	kv.canReturn[op.ID] = make(chan struct{}) // create a channel to signal when the operation is done
+	kv.canReturn[op.ReqID] = make(chan struct{}) // create a channel to signal when the operation is done
 	// send the operation to raft
 	_, _, rfIsLeader := kv.rf.Start(op)
 	// DPrintf(dServer, "%d, sendMsg: op=%v - H2", kv.me, op)
@@ -68,15 +72,15 @@ func (kv *KVServer) sendMsg(op Op) bool {
 	}
 	// wait for chan close
 	select {
-	case <-kv.canReturn[op.ID]: // wait for the operation to be done
+	case <-kv.canReturn[op.ReqID]: // wait for the operation to be done
 		DPrintf(dServer, "%d, sendMsg: op=%v done\n", kv.me, op)
-		close(kv.canReturn[op.ID])
-		delete(kv.canReturn, op.ID)
+		close(kv.canReturn[op.ReqID])
+		delete(kv.canReturn, op.ReqID)
 		return true
 	case <-time.After(10 * time.Second): // timeout after 10 seconds
 		DPrintf(dServer, "%d, sendMsg: op=%v timeout\n", kv.me, op)
-		close(kv.canReturn[op.ID])
-		delete(kv.canReturn, op.ID) // remove the channel from the map
+		close(kv.canReturn[op.ReqID])
+		delete(kv.canReturn, op.ReqID) // remove the channel from the map
 		return false
 	}
 }
@@ -108,7 +112,11 @@ func (kv *KVServer) getLeader() bool {
 	// send no-ops if i am the leader
 	if kv.leaderInfo.leaderId == kv.me {
 		// send no-op to myself with a timeout
-		return kv.sendMsg(Op{OpName: NoOp, ID: kv.genOpID()})
+		return kv.sendMsg(
+			Op{
+				OpName: NoOp,
+				ReqID:  GenReqId(),
+			})
 	}
 	return true
 }
@@ -118,17 +126,21 @@ func (kv *KVServer) getLeader() bool {
 // Get is the RPC handler for the Get method.
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if !kv.getLeader() {
 		reply.Err = ErrNoLeader
+		kv.mu.Unlock()
 		return
 	}
 	DPrintf(dServer, "%d, Get: leaderInfo=%v\n", kv.me, kv.leaderInfo)
 	if kv.leaderInfo.leaderId != kv.me {
 		reply.Err = ErrWrongLeader
 		reply.LeaderIdx = kv.leaderInfo.leaderId
+		kv.mu.Unlock()
 		return
 	}
+	kv.kvStoreMu.Lock()
+	kv.mu.Unlock()
+	defer kv.kvStoreMu.Unlock()
 	// I'm the leader if i don't crash, so I can handle the request without lock
 	// and send the reply.
 	if value, exists := kv.kvStore[args.Key]; exists {
@@ -154,7 +166,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	// send the message to raft
-	done := kv.sendMsg(Op{OpName: args.Op, Key: args.Key, Value: args.Value, ID: kv.genOpID()})
+	done := kv.sendMsg(
+		Op{
+			OpName: args.Op,
+			Key:    args.Key,
+			Value:  args.Value,
+			ReqID:  args.ReqID,
+		})
 	if !done {
 		reply.Err = ErrTimeout
 		return
@@ -178,8 +196,18 @@ func (kv *KVServer) raftApplyHandler() {
 			if applyMsg.CommandValid {
 				op := applyMsg.Command.(Op)
 				DPrintf(dServer, "%d, RaftApplyHandler: applyMsg=%v\n", kv.me, applyMsg)
-				// kv.mu.Lock()
+				kv.isDoneMu.Lock()
+				if kv.isDone[op.ReqID] {
+					kv.isDoneMu.Unlock()
+					DPrintf(dServer, "%d, RaftApplyHandler: op %s %s %s already done\n",
+						kv.me, op.OpName, op.Key, op.Value)
+					continue // operation already done, no need to apply again
+				}
+				kv.isDone[op.ReqID] = true // mark the operation as done
+				kv.isDoneMu.Unlock()
+				// kvStore update
 				if op.OpName != NoOp {
+					kv.kvStoreMu.Lock()
 					if op.OpName == PutOp {
 						kv.kvStore[op.Key] = op.Value
 					} else if op.OpName == AppendOp {
@@ -189,14 +217,17 @@ func (kv *KVServer) raftApplyHandler() {
 							kv.kvStore[op.Key] = op.Value
 						}
 					}
+					kv.kvStoreMu.Unlock()
 				}
 				DPrintf(dServer, "%d, RaftApplyHandler: applied %s %s %s\n",
 					kv.me, op.OpName, op.Key, op.Value)
-				if ch, exists := kv.canReturn[op.ID]; exists {
-					DPrintf(dServer, "%d, RaftApplyHandler: signaling done for op ID %d\n", kv.me, op.ID)
+				// signal that the operation is done.
+				// kv.canReturn is modified under kv.mu lock,
+				// so we can safely access it here without a lock.
+				if ch, exists := kv.canReturn[op.ReqID]; exists {
+					DPrintf(dServer, "%d, RaftApplyHandler: signaling done for op ID %d\n", kv.me, op.ReqID)
 					ch <- struct{}{} // signal that the operation is done
 				}
-				// kv.mu.Unlock()
 			} else if applyMsg.SnapshotValid {
 				DPrintf(dServer, "%d, RaftApplyHandler: snapshot applied\n", kv.me)
 				// handle snapshot (not implemented yet)
@@ -267,8 +298,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.leaderInfo.term = -1
 	kv.dead = 0
 
-	kv.canReturn = make(map[int]chan struct{})
-	kv.opGen = 0
+	kv.canReturn = make(map[string]chan struct{})
+	kv.isDone = make(map[string]bool)
 
 	go kv.raftApplyHandler()
 

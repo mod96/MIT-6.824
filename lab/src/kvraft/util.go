@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type logTopic string
@@ -54,4 +56,12 @@ func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error)
 		log.Printf(format, a...)
 	}
 	return
+}
+
+// generate unique identifier for each request.
+// this is used to deduplicate requests in the server.
+// It is unique across all Clerk instances and all servers by
+// using uuid and timestamp.
+func GenReqId() string {
+	return time.Now().Format("20060102150405.000") + "-" + uuid.New().String()
 }

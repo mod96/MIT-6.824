@@ -108,6 +108,13 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == Leader
 }
 
+// This is for client program to get leader index
+func (rf *Raft) GetLeaderIdx() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.leaderIdx
+}
+
 // **************************************************************************** Persistent
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -506,6 +513,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
+	rf.leaderIdx = args.LeaderId
 	// description 3 & 4
 	st := args.PrevLogIndex + 1
 	for i, entry := range args.Entries {
@@ -875,6 +883,7 @@ func (rf *Raft) ticker() {
 								// only place where it becomse leader
 								DPrintf(dVote, "S%d Candidate -> Leader, i'm now a leader in term %d", rf.me, rf.currentTerm)
 								rf.state = Leader
+								rf.leaderIdx = rf.me
 								rf.reInitializeVolatileStates()
 								rf.mu.Unlock()
 								rf.sendHeartbeat() // send heartbeat immediately to prevent stale leader elections
@@ -925,7 +934,7 @@ func (rf *Raft) sendHeartbeat() {
 		}
 	}
 
-	DPrintf(dLeader, "S%d Leader, checking heartbeats in term %d", rf.me, rf.currentTerm)
+	DPrintf(dLeader, "S%d Leader, checking heartbeats in term %d - commit %d", rf.me, rf.currentTerm, rf.commitIndex)
 	DPrintf(dTrace, "S%d Leader, rf.nextIndex: %v, rf.X: %d, len(rf.log): %d", rf.me, rf.nextIndex, rf.X, len(rf.log))
 	// Heartbeat
 	rf.lastHeartBeat = time.Now()

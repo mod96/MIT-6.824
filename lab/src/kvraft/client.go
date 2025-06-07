@@ -70,6 +70,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			Key:   key,
 			Value: value,
 			Op:    op,
+			ReqID: GenReqId(),
 		},
 		&reply)
 }
