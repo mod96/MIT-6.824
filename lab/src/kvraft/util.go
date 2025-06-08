@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,4 +65,35 @@ func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error)
 // using uuid and timestamp.
 func GenReqId() string {
 	return time.Now().Format("20060102150405.000") + "-" + uuid.New().String()
+}
+
+// Thread safe map
+type SafeChanMap struct {
+	mu   sync.RWMutex
+	data map[string]interface{}
+}
+
+func NewSafeChanMap() *SafeChanMap {
+	return &SafeChanMap{
+		data: make(map[string]interface{}),
+	}
+}
+
+func (m *SafeChanMap) Get(key string) (interface{}, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	val, ok := m.data[key]
+	return val, ok
+}
+
+func (m *SafeChanMap) Set(key string, val interface{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data[key] = val
+}
+
+func (m *SafeChanMap) Delete(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.data, key)
 }

@@ -14,12 +14,11 @@ import (
 
 	"6.824/models"
 	"6.824/porcupine"
-	"6.824/raft"
 )
 
 func TestMain(m *testing.M) {
 	DInit()
-	raft.DInit()
+	// raft.DInit()
 	code := m.Run()
 	os.Exit(code)
 }
@@ -504,6 +503,7 @@ func TestOnePartition3A(t *testing.T) {
 	ckp1 := cfg.makeClient(p1)  // connect ckp1 to p1
 	ckp2a := cfg.makeClient(p2) // connect ckp2a to p2
 	ckp2b := cfg.makeClient(p2) // connect ckp2b to p2
+	DPrintf(dTest, "p1: %v, p2: %v\n", p1, p2)
 
 	Put(cfg, ckp1, "1", "14", nil, -1)
 	check(cfg, t, ckp1, "1", "14")

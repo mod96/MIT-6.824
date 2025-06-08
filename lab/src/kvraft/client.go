@@ -10,20 +10,15 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	mu        sync.Mutex
-	leaderIdx int
-
-	srvMeToIdx     map[int]int // map server me to index in servers slice
-	srvMeToIdxInit bool        // whether srvMeToIdx is initialized
+	mu           sync.Mutex
+	leaderSrvIdx int
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.leaderIdx = 0
-	ck.srvMeToIdx = make(map[int]int)
-	ck.srvMeToIdxInit = false
+	ck.leaderSrvIdx = 0
 	return ck
 }
 
@@ -85,45 +80,45 @@ func (ck *Clerk) Append(key string, value string) {
 }
 
 // for both, we need to find correct leader and retry while rpc succeeds
-func (ck *Clerk) rpcCallWithRetry(svcMeth string, args interface{}, reply ReplyWithLeaderIdx) bool {
-	if !ck.srvMeToIdxInit {
-		for i, srv := range ck.servers {
-			for {
-				DPrintf(dClerk, "clerk calling GetMe on server %d", i)
-				reply := GetMeReply{}
-				ok := srv.Call("KVServer.GetMe", &GetMeArgs{}, &reply)
-				if ok {
-					ck.srvMeToIdx[reply.Me] = i
-					break
-				}
-				time.Sleep(100 * time.Millisecond) // wait a bit before retrying
-			}
-		}
-		ck.srvMeToIdxInit = true
-	}
+func (ck *Clerk) rpcCallWithRetry(svcMeth string, args interface{}, reply Reply) bool {
+	// lock is held outside
 	for {
-		leaderIdx := ck.leaderIdx
-		DPrintf(dClerk, "rpcCallWithRetry %s to serv %d with args %v\n", svcMeth, leaderIdx, args)
+		DPrintf(dClerk, "rpcCallWithRetry %s to srvIdx %d with args %v\n", svcMeth, ck.leaderSrvIdx, args)
 
-		// DPrintf(dClerk, "calling %s with %v on server %d\n", svcMeth, args, leaderIdx)
+		// DPrintf(dClerk, "calling %s with %v on server %d\n", svcMeth, args, leaderSrvIdx)
 		reply.Clear() // clear reply before sending (for labgob compatibility)
 		// send the RPC
-		ok := ck.servers[ck.srvMeToIdx[leaderIdx]].Call(svcMeth, args, reply)
+		ok := func() bool {
+			done := make(chan bool, 1)
+			go func() {
+				done <- ck.servers[ck.leaderSrvIdx].Call(svcMeth, args, reply)
+			}()
+			select {
+			case ok := <-done:
+				return ok
+			case <-time.After(3000 * time.Millisecond):
+				return false // timeout
+			}
+		}()
 		if ok {
+			// DPrintf(dClerk, "reply.Err: %s from srvIdx %d\n", reply.GetErr(), ck.leaderSrvIdx)
 			switch reply.GetErr() {
-			case ErrWrongLeader:
-				ck.leaderIdx = reply.GetLeaderIdx()
-			case ErrTimeout:
-				ck.leaderIdx = (ck.leaderIdx + 1) % len(ck.servers)
+			case ErrWrongLeader, ErrTimeout:
+				ck.leaderSrvIdx = (ck.leaderSrvIdx + 1) % len(ck.servers)
 			case ErrNoKey: // Get NoKey
 				return true
 			case ErrNoLeader: // Leader is not elected yet
 				time.Sleep(500 * time.Millisecond)
+				ck.leaderSrvIdx = (ck.leaderSrvIdx + 1) % len(ck.servers)
 			case OK:
 				return true
 			default:
 				panic("unexpected error")
 			}
+		} else {
+			// DPrintf(dClerk, "rpcCallWithRetry %s failed on srvIdx %d\n", svcMeth, ck.leaderSrvIdx)
+			// RPC failed, try next server
+			ck.leaderSrvIdx = (ck.leaderSrvIdx + 1) % len(ck.servers)
 		}
 	}
 }

@@ -10,8 +10,7 @@ const (
 
 type Err string
 
-type ReplyWithLeaderIdx interface {
-	GetLeaderIdx() int
+type Reply interface {
 	GetErr() Err
 	Clear()
 }
@@ -28,13 +27,9 @@ type PutAppendArgs struct {
 }
 
 type PutAppendReply struct {
-	Err       Err
-	LeaderIdx int
+	Err Err
 }
 
-func (reply *PutAppendReply) GetLeaderIdx() int {
-	return reply.LeaderIdx
-}
 func (reply *PutAppendReply) GetErr() Err {
 	return reply.Err
 }
@@ -48,23 +43,13 @@ type GetArgs struct {
 }
 
 type GetReply struct {
-	Err       Err
-	Value     string
-	LeaderIdx int
+	Err   Err
+	Value string
 }
 
-func (reply *GetReply) GetLeaderIdx() int {
-	return reply.LeaderIdx
-}
 func (reply *GetReply) GetErr() Err {
 	return reply.Err
 }
 func (reply *GetReply) Clear() {
 	*reply = GetReply{}
-}
-
-type GetMeArgs struct {
-}
-type GetMeReply struct {
-	Me int
 }
